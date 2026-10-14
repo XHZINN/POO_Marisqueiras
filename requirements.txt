@@ -1,0 +1,6 @@
+# Execução do sistema
+PySide6>=6.11
+
+# Desenvolvimento (testes e formatação)
+pytest>=9.0
+ruff>=0.9

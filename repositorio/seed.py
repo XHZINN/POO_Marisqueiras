@@ -1,0 +1,183 @@
+"""Dados de demonstração: Vila Maresia, Raposa/MA (P4).
+
+Executado apenas quando o banco está vazio, para que o sistema abra com
+conteúdo navegável em vez de telas em branco.
+"""
+
+from __future__ import annotations
+
+from datetime import time
+from decimal import Decimal
+
+from dominio.empresa import EmpresaCompradora, EmpresaMarisqueira
+from dominio.enums import Categoria, StatusEntrega
+from repositorio.repositorio import Repositorio
+
+
+def popular(repo: Repositorio) -> None:
+    """Cria empresas, produtos, um histórico de pedidos e avaliações."""
+
+    # Empresas das marisqueiras (RN02, RN03)
+    maresia = repo.salvar_empresa(
+        EmpresaMarisqueira(
+            nome="Marisqueiras Vila Maresia",
+            cnpj="11.111.111/0001-11",
+            email="contato@vilamaresia.com.br",
+            telefone="(98) 98800-1001",
+            endereco="Rua da Praia, 10, Vila Maresia",
+            localizacao="Raposa/MA",
+            abertura=time(6, 0),
+            fechamento=time(18, 0),
+        )
+    )
+    dona_rosa = repo.salvar_empresa(
+        EmpresaMarisqueira(
+            nome="Marisqueira Dona Rosa",  # RN03: atuação individual
+            cnpj="22.222.222/0001-22",
+            email="donarosa@vilamaresia.com.br",
+            telefone="(98) 98800-1002",
+            endereco="Travessa do Porto, 7, Vila Maresia",
+            localizacao="Raposa/MA",
+            abertura=time(5, 30),
+            fechamento=time(17, 0),
+        )
+    )
+    aracagi = repo.salvar_empresa(
+        EmpresaMarisqueira(
+            nome="Marisqueiras do Araçagi",
+            cnpj="33.333.333/0001-33",
+            email="aracagi@marisqueiras.com.br",
+            telefone="(98) 98800-1003",
+            endereco="Av. Litorânea, 520",
+            localizacao="São Luís/MA",
+            abertura=time(7, 0),
+            fechamento=time(19, 0),
+        )
+    )
+
+    # Empresas compradoras (RN01, P6)
+    mare_alta = repo.salvar_empresa(
+        EmpresaCompradora(
+            nome="Restaurante Maré Alta",
+            cnpj="44.444.444/0001-44",
+            email="compras@marealta.com.br",
+            telefone="(98) 98800-2001",
+            endereco="Rua do Giz, 120, Centro",
+            localizacao="São Luís/MA",
+        )
+    )
+    repo.salvar_empresa(
+        EmpresaCompradora(
+            nome="Peixaria Central Distribuidora",
+            cnpj="55.555.555/0001-55",
+            email="suprimentos@peixariacentral.com.br",
+            telefone="(98) 98800-2002",
+            endereco="Mercado do Peixe, Box 14",
+            localizacao="Raposa/MA",
+        )
+    )
+
+    # Produtos (RN04, RN05, RN06)
+    # RN06: sururu fresco e congelado são dois produtos distintos.
+    produtos = [
+        maresia.cadastrar_produto(
+            "Sururu", Categoria.FRESCO, Decimal("18.50"), Decimal("320")
+        ),
+        maresia.cadastrar_produto(
+            "Sururu", Categoria.CONGELADO, Decimal("16.00"), Decimal("500")
+        ),
+        maresia.cadastrar_produto(
+            "Ostra", Categoria.FRESCO, Decimal("34.00"), Decimal("180")
+        ),
+        maresia.cadastrar_produto(
+            "Camarão", Categoria.CONGELADO, Decimal("48.00"), Decimal("240")
+        ),
+        dona_rosa.cadastrar_produto(
+            "Sururu", Categoria.FRESCO, Decimal("17.00"), Decimal("150")
+        ),
+        dona_rosa.cadastrar_produto(
+            "Caranguejo", Categoria.FRESCO, Decimal("29.00"), Decimal("90")
+        ),
+        # RN09: estoque zerado: continua cadastrado, aparece como indisponível.
+        dona_rosa.cadastrar_produto(
+            "Ostra", Categoria.CONGELADO, Decimal("31.00"), Decimal("25")
+        ),
+        aracagi.cadastrar_produto(
+            "Sururu", Categoria.FRESCO, Decimal("21.00"), Decimal("400")
+        ),
+        aracagi.cadastrar_produto(
+            "Camarão", Categoria.FRESCO, Decimal("55.00"), Decimal("120")
+        ),
+        aracagi.cadastrar_produto(
+            "Peixe Pescada", Categoria.CONGELADO, Decimal("26.00"), Decimal("300")
+        ),
+    ]
+    for produto in produtos:
+        repo.salvar_produto(produto)
+
+    # RN09: um produto com estoque zerado, para a busca mostrar o caso.
+    ostra_congelada = produtos[6]
+    dona_rosa.alterar_quantidade(ostra_congelada, Decimal("0"))
+    repo.salvar_produto(ostra_congelada)
+
+    # Histórico de pedidos (P7)
+    # Pedido entregue e avaliado, para a média de estrelas existir (RN11).
+    entregue = mare_alta.realizar_pedido(
+        [(produtos[0], Decimal("60")), (produtos[2], Decimal("40"))],
+        "Rua do Giz, 120, Centro, São Luís/MA",
+        3,
+    )
+    maresia.aceitar_pedido(entregue)
+    maresia.atualizar_status_entrega(entregue, StatusEntrega.SAIU_PARA_ENTREGA)
+    mare_alta.confirmar_entrega(entregue)  # quem recebe é quem confirma
+    repo.salvar_pedido(entregue)
+    repo.salvar_avaliacao(
+        mare_alta.avaliar_empresa(
+            entregue, 5, "Sururu muito fresco e entrega no prazo."
+        )
+    )
+
+    entregue_rosa = mare_alta.realizar_pedido(
+        [(produtos[4], Decimal("50"))],
+        "Rua do Giz, 120, Centro, São Luís/MA",
+        2,
+    )
+    dona_rosa.aceitar_pedido(entregue_rosa)
+    dona_rosa.atualizar_status_entrega(entregue_rosa, StatusEntrega.SAIU_PARA_ENTREGA)
+    mare_alta.confirmar_entrega(entregue_rosa)
+    repo.salvar_pedido(entregue_rosa)
+    repo.salvar_avaliacao(
+        mare_alta.avaliar_empresa(
+            entregue_rosa, 4, "Bom produto, entrega um dia depois."
+        )
+    )
+
+    # Pedido aguardando análise, para a marisqueira ter o que decidir ao abrir.
+    pendente = mare_alta.realizar_pedido(
+        [(produtos[3], Decimal("80"))],
+        "Rua do Giz, 120, Centro, São Luís/MA",
+        4,
+    )
+    repo.salvar_pedido(pendente)
+
+    # Pedido com ajuste solicitado: a compradora precisa responder (P7).
+    em_ajuste = mare_alta.realizar_pedido(
+        [(produtos[8], Decimal("100"))],
+        "Rua do Giz, 120, Centro, São Luís/MA",
+        5,
+    )
+    aracagi.solicitar_ajuste(
+        em_ajuste,
+        "Consigo atender 60 kg nesta data. Pode ajustar a quantidade?",
+    )
+    repo.salvar_pedido(em_ajuste)
+
+    # Pedido despachado: a compradora precisa confirmar o recebimento (RN22).
+    em_rota = mare_alta.realizar_pedido(
+        [(produtos[9], Decimal("90"))],
+        "Rua do Giz, 120, Centro, São Luís/MA",
+        2,
+    )
+    aracagi.aceitar_pedido(em_rota)
+    aracagi.atualizar_status_entrega(em_rota, StatusEntrega.SAIU_PARA_ENTREGA)
+    repo.salvar_pedido(em_rota)

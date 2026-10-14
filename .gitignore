@@ -218,3 +218,12 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Banco local, recriado do seed na primeira execucao
+marisqueiras.db
+
+# Anotacoes pessoais, nao fazem parte do projeto
+GUIA_DE_DEFESA.md
+
+# Material da disciplina
+*.pdf

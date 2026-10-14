@@ -1,0 +1,22 @@
+[project]
+name = "marisqueiras-da-ilha"
+version = "1.0.0"
+description = "Sistema Marisquês — comercialização direta de mariscos entre empresas (B2B)"
+requires-python = ">=3.12"
+dependencies = ["PySide6>=6.11"]
+
+[tool.ruff]
+line-length = 88
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "N"]
+ignore = [
+    # N818 exige que exceções terminem em "Error". A convenção é inglesa e o
+    # domínio deste projeto é nomeado em português: `ErroDeNegocio` já carrega
+    # "Erro" no nome, e renomear para `NegocioError` misturaria os idiomas.
+    "N818",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

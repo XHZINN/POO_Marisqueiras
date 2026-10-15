@@ -24,11 +24,13 @@ from dominio.excecoes import (
     AvaliacaoInvalida,
     DadoObrigatorio,
     EmpresasDiferentesNoPedido,
+    PedidoVazio,
     PrecoAlteradoEmVenda,
     QuantidadeIndisponivel,
     QuantidadeInvalida,
     TransicaoInvalida,
 )
+from dominio.pedido import Pedido
 
 # Fixtures
 
@@ -149,25 +151,25 @@ def test_rn12_empresa_nao_altera_produto_de_outra(outra_marisqueira, sururu):
 
 def test_rn15_minimo_de_25kg_por_produto(compradora, sururu):
     with pytest.raises(QuantidadeInvalida):
-        compradora.realizar_pedido([(sururu, Decimal("20"))], "Rua X, 1", 3)
+        compradora.realizar_pedido([(sururu, Decimal("20"))], "Rua X, 1")
 
 
 def test_rn15_nao_se_burla_somando_dois_itens_do_mesmo_produto(compradora, sururu):
     with pytest.raises(QuantidadeInvalida):
         compradora.realizar_pedido(
-            [(sururu, Decimal("15")), (sururu, Decimal("15"))], "Rua X, 1", 3
+            [(sururu, Decimal("15")), (sururu, Decimal("15"))], "Rua X, 1"
         )
 
 
 def test_rn18_pedido_acima_do_estoque_e_impedido(compradora, maresia, sururu):
     maresia.alterar_quantidade(sururu, Decimal("30"))
     with pytest.raises(QuantidadeIndisponivel) as erro:
-        compradora.realizar_pedido([(sururu, Decimal("100"))], "Rua X, 1", 3)
+        compradora.realizar_pedido([(sururu, Decimal("100"))], "Rua X, 1")
     assert "30" in str(erro.value)  # RN18: informa o estoque real
 
 
 def test_rn17_nao_existe_quantidade_maxima_fixa(compradora, sururu):
-    pedido = compradora.realizar_pedido([(sururu, Decimal("200"))], "Rua X, 1", 3)
+    pedido = compradora.realizar_pedido([(sururu, Decimal("200"))], "Rua X, 1")
     assert pedido.quantidade_total_kg == Decimal("200")
 
 
@@ -184,9 +186,7 @@ def test_rn14_pedido_nao_reune_empresas_diferentes(
         "Ostra", Categoria.FRESCO, Decimal("30"), Decimal("100")
     )
     with pytest.raises(EmpresasDiferentesNoPedido):
-        compradora.realizar_pedido(
-            [(a, Decimal("30")), (b, Decimal("30"))], "Rua X, 1", 3
-        )
+        compradora.realizar_pedido([(a, Decimal("30")), (b, Decimal("30"))], "Rua X, 1")
 
 
 def test_rn28_pedido_aceita_varios_produtos_da_mesma_empresa(compradora, maresia):
@@ -197,7 +197,7 @@ def test_rn28_pedido_aceita_varios_produtos_da_mesma_empresa(compradora, maresia
         "Ostra", Categoria.FRESCO, Decimal("30"), Decimal("100")
     )
     pedido = compradora.realizar_pedido(
-        [(a, Decimal("30")), (b, Decimal("25"))], "Rua X, 1", 3
+        [(a, Decimal("30")), (b, Decimal("25"))], "Rua X, 1"
     )
     assert len(pedido.itens) == 2
     assert pedido.total == Decimal("30") * Decimal("18") + Decimal("25") * Decimal("30")
@@ -207,7 +207,7 @@ def test_rn28_pedido_aceita_varios_produtos_da_mesma_empresa(compradora, maresia
 
 
 def test_rn07_item_guarda_copia_do_preco(compradora, maresia, sururu):
-    pedido = compradora.realizar_pedido([(sururu, Decimal("30"))], "Rua X, 1", 3)
+    pedido = compradora.realizar_pedido([(sururu, Decimal("30"))], "Rua X, 1")
     maresia.aceitar_pedido(pedido)
     pedido.compradora.informar_pagamento(pedido)
     maresia.confirmar_pagamento(pedido)
@@ -219,7 +219,7 @@ def test_rn07_item_guarda_copia_do_preco(compradora, maresia, sururu):
 
 
 def test_rn07_preco_travado_com_venda_em_andamento(compradora, maresia, sururu):
-    compradora.realizar_pedido([(sururu, Decimal("30"))], "Rua X, 1", 3)
+    compradora.realizar_pedido([(sururu, Decimal("30"))], "Rua X, 1")
     with pytest.raises(PrecoAlteradoEmVenda):
         maresia.alterar_preco_produto(sururu, Decimal("25.00"))
 
@@ -228,7 +228,7 @@ def test_rn07_preco_travado_com_venda_em_andamento(compradora, maresia, sururu):
 
 
 def test_p7_fluxo_completo_ate_entrega(compradora, maresia, sururu):
-    pedido = compradora.realizar_pedido([(sururu, Decimal("50"))], "Rua X, 1", 3)
+    pedido = compradora.realizar_pedido([(sururu, Decimal("50"))], "Rua X, 1")
     assert pedido.status is StatusPedido.AGUARDANDO_ANALISE
 
     maresia.aceitar_pedido(pedido)
@@ -243,7 +243,7 @@ def test_p7_fluxo_completo_ate_entrega(compradora, maresia, sururu):
 
 
 def test_p7_rejeicao_exige_motivo(compradora, maresia, sururu):
-    pedido = compradora.realizar_pedido([(sururu, Decimal("30"))], "Rua X, 1", 3)
+    pedido = compradora.realizar_pedido([(sururu, Decimal("30"))], "Rua X, 1")
     with pytest.raises(DadoObrigatorio):
         maresia.rejeitar_pedido(pedido, "   ")
     maresia.rejeitar_pedido(pedido, "Sem capacidade de entrega nesta semana.")
@@ -251,21 +251,21 @@ def test_p7_rejeicao_exige_motivo(compradora, maresia, sururu):
 
 
 def test_p7_pedido_rejeitado_nao_pode_ser_aceito(compradora, maresia, sururu):
-    pedido = compradora.realizar_pedido([(sururu, Decimal("30"))], "Rua X, 1", 3)
+    pedido = compradora.realizar_pedido([(sururu, Decimal("30"))], "Rua X, 1")
     maresia.rejeitar_pedido(pedido, "Fora de temporada.")
     with pytest.raises(TransicaoInvalida):
         maresia.aceitar_pedido(pedido)
 
 
 def test_p7_solicitar_ajuste(compradora, maresia, sururu):
-    pedido = compradora.realizar_pedido([(sururu, Decimal("30"))], "Rua X, 1", 3)
+    pedido = compradora.realizar_pedido([(sururu, Decimal("30"))], "Rua X, 1")
     maresia.solicitar_ajuste(pedido, "Consigo entregar 25 kg nesta data.")
     assert pedido.status is StatusPedido.AJUSTE_SOLICITADO
     assert pedido.observacao_ajuste
 
 
 def test_rn22_entrega_nao_atualiza_antes_do_aceite(compradora, maresia, sururu):
-    pedido = compradora.realizar_pedido([(sururu, Decimal("30"))], "Rua X, 1", 3)
+    pedido = compradora.realizar_pedido([(sururu, Decimal("30"))], "Rua X, 1")
     with pytest.raises(TransicaoInvalida):
         pedido.compradora.informar_pagamento(pedido)
         maresia.confirmar_pagamento(pedido)
@@ -275,16 +275,38 @@ def test_rn22_entrega_nao_atualiza_antes_do_aceite(compradora, maresia, sururu):
 def test_rn12_marisqueira_nao_aceita_pedido_de_outra(
     compradora, maresia, outra_marisqueira, sururu
 ):
-    pedido = compradora.realizar_pedido([(sururu, Decimal("30"))], "Rua X, 1", 3)
+    pedido = compradora.realizar_pedido([(sururu, Decimal("30"))], "Rua X, 1")
     with pytest.raises(AcessoNaoAutorizado):
         outra_marisqueira.aceitar_pedido(pedido)
 
 
 def test_rn13_dados_obrigatorios_do_pedido(compradora, sururu):
     with pytest.raises(DadoObrigatorio):
-        compradora.realizar_pedido([(sururu, Decimal("30"))], "", 3)
+        compradora.realizar_pedido([], "Rua X, 1")
+    # O endereço continua obrigatório (RN13): o pedido sem destino nenhum é
+    # recusado na própria construção.
     with pytest.raises(DadoObrigatorio):
-        compradora.realizar_pedido([(sururu, Decimal("30"))], "Rua X, 1", 0)
+        Pedido(compradora=compradora, endereco_entrega="   ")
+    # E pedido sem item não passa pela validação de envio.
+    with pytest.raises(PedidoVazio):
+        Pedido(compradora=compradora, endereco_entrega="Rua X, 1").validar_para_envio()
+
+
+def test_rn13_sem_endereco_informado_usa_o_do_cadastro(compradora, sururu):
+    """Compra sem escolher endereço cai no cadastro, não em erro.
+
+    Antes o endereço era campo digitado a cada compra. Agora vem do cadastro,
+    então deixar em branco significa "entrega onde sempre".
+    """
+    pedido = compradora.realizar_pedido([(sururu, Decimal("30"))])
+    assert pedido.endereco_entrega == compradora.endereco
+
+
+def test_rn13_prazo_vem_calculado_e_nao_digitado(compradora, maresia, sururu):
+    """O prazo do pedido é estimativa do sistema, não campo da compradora."""
+    pedido = compradora.realizar_pedido([(sururu, Decimal("30"))], "Rua X, 1")
+    assert pedido.tempo_entrega_dias >= 1
+    assert not pedido.prazo_confirmado
 
 
 # RN10, RN11, RN12: busca, ordenação e visibilidade
@@ -379,7 +401,7 @@ def test_p26_comparacao_exige_dois_produtos(compradora, sururu):
 
 
 def _pedido_entregue(compradora, maresia, produto):
-    pedido = compradora.realizar_pedido([(produto, Decimal("30"))], "Rua X, 1", 3)
+    pedido = compradora.realizar_pedido([(produto, Decimal("30"))], "Rua X, 1")
     maresia.aceitar_pedido(pedido)
     pedido.compradora.informar_pagamento(pedido)
     maresia.confirmar_pagamento(pedido)
@@ -389,7 +411,7 @@ def _pedido_entregue(compradora, maresia, produto):
 
 
 def test_rn21_avaliacao_somente_apos_a_entrega(compradora, maresia, sururu):
-    pedido = compradora.realizar_pedido([(sururu, Decimal("30"))], "Rua X, 1", 3)
+    pedido = compradora.realizar_pedido([(sururu, Decimal("30"))], "Rua X, 1")
     with pytest.raises(AvaliacaoInvalida):
         compradora.avaliar_empresa(pedido, 5)
 
@@ -480,7 +502,7 @@ def test_polimorfismo_de_tipo_e_consulta(maresia, compradora, sururu):
 
 
 def test_compradora_responde_ao_ajuste_e_reenvia(compradora, maresia, sururu):
-    pedido = compradora.realizar_pedido([(sururu, Decimal("100"))], "Rua X, 1", 3)
+    pedido = compradora.realizar_pedido([(sururu, Decimal("100"))], "Rua X, 1")
     maresia.solicitar_ajuste(pedido, "Consigo 60 kg nesta data.")
     assert pedido.aguarda_resposta_da_compradora
 
@@ -494,7 +516,7 @@ def test_compradora_responde_ao_ajuste_e_reenvia(compradora, maresia, sururu):
 
 
 def test_ajuste_revalida_rn15(compradora, maresia, sururu):
-    pedido = compradora.realizar_pedido([(sururu, Decimal("100"))], "Rua X, 1", 3)
+    pedido = compradora.realizar_pedido([(sururu, Decimal("100"))], "Rua X, 1")
     maresia.solicitar_ajuste(pedido, "Consigo pouco.")
     with pytest.raises(QuantidadeInvalida):
         compradora.responder_ajuste(pedido, [(sururu, Decimal("10"))])
@@ -504,7 +526,7 @@ def test_ajuste_revalida_rn15(compradora, maresia, sururu):
 
 
 def test_ajuste_revalida_rn18(compradora, maresia, sururu):
-    pedido = compradora.realizar_pedido([(sururu, Decimal("50"))], "Rua X, 1", 3)
+    pedido = compradora.realizar_pedido([(sururu, Decimal("50"))], "Rua X, 1")
     maresia.solicitar_ajuste(pedido, "Confirme a quantidade.")
     with pytest.raises(QuantidadeIndisponivel):
         compradora.responder_ajuste(pedido, [(sururu, Decimal("5000"))])
@@ -512,7 +534,7 @@ def test_ajuste_revalida_rn18(compradora, maresia, sururu):
 
 
 def test_ajuste_revalida_rn14(compradora, maresia, outra_marisqueira, sururu):
-    pedido = compradora.realizar_pedido([(sururu, Decimal("50"))], "Rua X, 1", 3)
+    pedido = compradora.realizar_pedido([(sururu, Decimal("50"))], "Rua X, 1")
     maresia.solicitar_ajuste(pedido, "Confirme.")
     outro = outra_marisqueira.cadastrar_produto(
         "Ostra", Categoria.FRESCO, Decimal("30"), Decimal("100")
@@ -522,7 +544,7 @@ def test_ajuste_revalida_rn14(compradora, maresia, outra_marisqueira, sururu):
 
 
 def test_compradora_cancela_quando_o_ajuste_nao_serve(compradora, maresia, sururu):
-    pedido = compradora.realizar_pedido([(sururu, Decimal("100"))], "Rua X, 1", 3)
+    pedido = compradora.realizar_pedido([(sururu, Decimal("100"))], "Rua X, 1")
     maresia.solicitar_ajuste(pedido, "Consigo só 10 kg.")
     compradora.cancelar_pedido(pedido)
     assert pedido.status is StatusPedido.CANCELADO
@@ -532,14 +554,14 @@ def test_compradora_cancela_quando_o_ajuste_nao_serve(compradora, maresia, surur
 
 def test_marisqueira_nao_aceita_sozinha_apos_pedir_ajuste(compradora, maresia, sururu):
     """A bola fica com a compradora: ajuste solicitado não vai direto a aceito."""
-    pedido = compradora.realizar_pedido([(sururu, Decimal("100"))], "Rua X, 1", 3)
+    pedido = compradora.realizar_pedido([(sururu, Decimal("100"))], "Rua X, 1")
     maresia.solicitar_ajuste(pedido, "Reduza a quantidade.")
     with pytest.raises(TransicaoInvalida):
         maresia.aceitar_pedido(pedido)
 
 
 def test_ajuste_so_vale_em_pedido_com_ajuste_solicitado(compradora, sururu):
-    pedido = compradora.realizar_pedido([(sururu, Decimal("50"))], "Rua X, 1", 3)
+    pedido = compradora.realizar_pedido([(sururu, Decimal("50"))], "Rua X, 1")
     with pytest.raises(TransicaoInvalida):
         compradora.responder_ajuste(pedido, [(sururu, Decimal("40"))])
 
@@ -553,7 +575,7 @@ def test_compradora_nao_mexe_em_pedido_de_outra(compradora, maresia, sururu):
         endereco="Rua Z, 9",
         localizacao="São Luís/MA",
     )
-    pedido = compradora.realizar_pedido([(sururu, Decimal("50"))], "Rua X, 1", 3)
+    pedido = compradora.realizar_pedido([(sururu, Decimal("50"))], "Rua X, 1")
     with pytest.raises(AcessoNaoAutorizado):
         outra.cancelar_pedido(pedido)
 
@@ -562,7 +584,7 @@ def test_compradora_nao_mexe_em_pedido_de_outra(compradora, maresia, sururu):
 
 
 def test_marisqueira_nao_marca_como_entregue(compradora, maresia, sururu):
-    pedido = compradora.realizar_pedido([(sururu, Decimal("50"))], "Rua X, 1", 3)
+    pedido = compradora.realizar_pedido([(sururu, Decimal("50"))], "Rua X, 1")
     maresia.aceitar_pedido(pedido)
     pedido.compradora.informar_pagamento(pedido)
     maresia.confirmar_pagamento(pedido)
@@ -574,7 +596,7 @@ def test_marisqueira_nao_marca_como_entregue(compradora, maresia, sururu):
 
 
 def test_compradora_confirma_o_recebimento(compradora, maresia, sururu):
-    pedido = compradora.realizar_pedido([(sururu, Decimal("50"))], "Rua X, 1", 3)
+    pedido = compradora.realizar_pedido([(sururu, Decimal("50"))], "Rua X, 1")
     maresia.aceitar_pedido(pedido)
     pedido.compradora.informar_pagamento(pedido)
     maresia.confirmar_pagamento(pedido)
@@ -589,7 +611,7 @@ def test_compradora_confirma_o_recebimento(compradora, maresia, sururu):
 
 
 def test_nao_confirma_recebimento_antes_do_despacho(compradora, maresia, sururu):
-    pedido = compradora.realizar_pedido([(sururu, Decimal("50"))], "Rua X, 1", 3)
+    pedido = compradora.realizar_pedido([(sururu, Decimal("50"))], "Rua X, 1")
     maresia.aceitar_pedido(pedido)
     assert not pedido.pode_confirmar_recebimento
     with pytest.raises(TransicaoInvalida):
@@ -601,13 +623,13 @@ def test_nao_confirma_recebimento_antes_do_despacho(compradora, maresia, sururu)
 
 def test_pedido_novo_notifica_a_marisqueira(compradora, maresia, sururu):
     assert maresia.total_nao_lidas == 0
-    compradora.realizar_pedido([(sururu, Decimal("50"))], "Rua X, 1", 3)
+    compradora.realizar_pedido([(sururu, Decimal("50"))], "Rua X, 1")
     assert maresia.total_nao_lidas == 1
     assert maresia.notificacoes[-1].tipo is TipoNotificacao.PEDIDO_RECEBIDO
 
 
 def test_despacho_notifica_a_compradora(compradora, maresia, sururu):
-    pedido = compradora.realizar_pedido([(sururu, Decimal("50"))], "Rua X, 1", 3)
+    pedido = compradora.realizar_pedido([(sururu, Decimal("50"))], "Rua X, 1")
     compradora.marcar_notificacoes_como_lidas()
     maresia.aceitar_pedido(pedido)
     pedido.compradora.informar_pagamento(pedido)
@@ -620,7 +642,7 @@ def test_despacho_notifica_a_compradora(compradora, maresia, sururu):
 
 
 def test_ajuste_e_reenvio_notificam_as_duas_pontas(compradora, maresia, sururu):
-    pedido = compradora.realizar_pedido([(sururu, Decimal("100"))], "Rua X, 1", 3)
+    pedido = compradora.realizar_pedido([(sururu, Decimal("100"))], "Rua X, 1")
     maresia.solicitar_ajuste(pedido, "Reduza para 60 kg.")
     assert any(
         n.tipo is TipoNotificacao.AJUSTE_SOLICITADO
@@ -636,14 +658,14 @@ def test_ajuste_e_reenvio_notificam_as_duas_pontas(compradora, maresia, sururu):
 
 
 def test_rejeicao_e_cancelamento_notificam(compradora, maresia, sururu):
-    rejeitado = compradora.realizar_pedido([(sururu, Decimal("30"))], "Rua X, 1", 3)
+    rejeitado = compradora.realizar_pedido([(sururu, Decimal("30"))], "Rua X, 1")
     maresia.rejeitar_pedido(rejeitado, "Fora de temporada.")
     assert any(
         n.tipo is TipoNotificacao.PEDIDO_REJEITADO
         for n in compradora.notificacoes_nao_lidas
     )
 
-    cancelado = compradora.realizar_pedido([(sururu, Decimal("30"))], "Rua X, 1", 3)
+    cancelado = compradora.realizar_pedido([(sururu, Decimal("30"))], "Rua X, 1")
     maresia.marcar_notificacoes_como_lidas()
     compradora.cancelar_pedido(cancelado)
     assert any(
@@ -661,7 +683,7 @@ def test_confirmacao_e_avaliacao_notificam_a_marisqueira(compradora, maresia, su
 
 
 def test_marcar_como_lidas_zera_a_caixa(compradora, maresia, sururu):
-    compradora.realizar_pedido([(sururu, Decimal("50"))], "Rua X, 1", 3)
+    compradora.realizar_pedido([(sururu, Decimal("50"))], "Rua X, 1")
     assert maresia.total_nao_lidas == 1
     alteradas = maresia.marcar_notificacoes_como_lidas()
     assert len(alteradas) == 1

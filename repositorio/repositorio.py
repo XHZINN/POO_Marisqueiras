@@ -18,6 +18,7 @@ from pathlib import Path
 from dominio.avaliacao import Avaliacao
 from dominio.coordenada import Coordenada
 from dominio.empresa import Empresa, EmpresaCompradora, EmpresaMarisqueira
+from dominio.endereco import Endereco
 from dominio.entrega import EventoEntrega
 from dominio.enums import (
     Categoria,
@@ -58,6 +59,46 @@ def _colunas_origem(origem) -> tuple:
         origem.coordenada.latitude if origem.coordenada else None,
         origem.coordenada.longitude if origem.coordenada else None,
         origem.observacoes,
+    )
+
+
+def _colunas_entrega(endereco) -> tuple:
+    """As nove colunas entrega_* do pedido, ou None em todas.
+
+    Mesma ideia de `_colunas_origem`: a cópia do endereço fica achatada em
+    colunas do próprio pedido, porque é dado congelado na compra e não um
+    cadastro que vive por conta própria.
+    """
+    if endereco is None:
+        return (None,) * 9
+    return (
+        endereco.apelido,
+        endereco.logradouro,
+        endereco.numero,
+        endereco.bairro,
+        endereco.cidade,
+        endereco.uf,
+        endereco.cep,
+        endereco.complemento,
+        endereco.referencia,
+    )
+
+
+def _endereco_congelado(linha) -> Endereco | None:
+    """Reconstrói a cópia do endereço gravada no pedido."""
+    if linha["entrega_logradouro"] is None:
+        return None
+    return Endereco(
+        apelido=linha["entrega_apelido"] or "Entrega",
+        logradouro=linha["entrega_logradouro"],
+        numero=linha["entrega_numero"] or "s/n",
+        bairro=linha["entrega_bairro"] or "-",
+        cidade=linha["entrega_cidade"] or "-",
+        uf=linha["entrega_uf"] or "MA",
+        cep=linha["entrega_cep"],
+        complemento=linha["entrega_complemento"],
+        referencia=linha["entrega_referencia"],
+        coordenada=_coordenada(linha, "entrega_"),
     )
 
 
@@ -113,6 +154,7 @@ class Repositorio:
         self.notificacoes.clear()
 
         self._carregar_empresas()
+        self._carregar_enderecos()
         self._carregar_produtos()
         self._carregar_pedidos()
         self._carregar_avaliacoes()
@@ -138,6 +180,11 @@ class Repositorio:
                 coordenada=_coordenada(linha),
                 id=linha["id"],
             )
+            if isinstance(empresa_nova, EmpresaMarisqueira):
+                if linha["preparo_horas"] is not None:
+                    empresa_nova.prazo_preparo_horas = int(linha["preparo_horas"])
+                if linha["raio_entrega_km"] is not None:
+                    empresa_nova.raio_entrega_km = Decimal(linha["raio_entrega_km"])
             self.empresas[linha["id"]] = empresa_nova
 
         # Formas de pagamento aceitas por cada marisqueira (extensão de P27).
@@ -148,6 +195,37 @@ class Repositorio:
                     empresa.formas_pagamento_aceitas = set()
                     empresa._formas_carregadas = True
                 empresa.formas_pagamento_aceitas.add(FormaPagamento(linha["forma"]))
+
+    def _carregar_enderecos(self) -> None:
+        """Endereços de entrega cadastrados pelas compradoras.
+
+        Anexa direto na lista em vez de passar por `adicionar_endereco`: o que
+        está no banco já foi validado quando foi cadastrado, e o método
+        promoveria o primeiro a principal, trocando a escolha que está
+        gravada na coluna `principal`.
+        """
+        for linha in self.conexao.execute(
+            "SELECT * FROM endereco ORDER BY empresa_id, id"
+        ):
+            empresa = self.empresas.get(linha["empresa_id"])
+            if not isinstance(empresa, EmpresaCompradora):
+                continue
+            empresa.enderecos.append(
+                Endereco(
+                    apelido=linha["apelido"],
+                    logradouro=linha["logradouro"],
+                    numero=linha["numero"],
+                    bairro=linha["bairro"],
+                    cidade=linha["cidade"],
+                    uf=linha["uf"],
+                    cep=linha["cep"],
+                    complemento=linha["complemento"],
+                    referencia=linha["referencia"],
+                    coordenada=_coordenada(linha),
+                    principal=bool(linha["principal"]),
+                    id=linha["id"],
+                )
+            )
 
     def _carregar_produtos(self) -> None:
         for linha in self.conexao.execute("SELECT * FROM produto ORDER BY id"):
@@ -197,9 +275,18 @@ class Repositorio:
                 forma_pagamento=FormaPagamento(linha["forma_pagamento"]),
                 status_pagamento=StatusPagamento(linha["status_pagamento"]),
                 coordenada_entrega=_coordenada(linha, "entrega_"),
+                prazo_confirmado=bool(linha["prazo_confirmado"]),
+                previsao_entrega=(
+                    datetime.fromisoformat(linha["previsao_entrega"])
+                    if linha["previsao_entrega"]
+                    else None
+                ),
                 criado_em=datetime.fromisoformat(linha["criado_em"]),
                 id=linha["id"],
             )
+            # A cópia congelada entra depois da construção pra o texto de
+            # `endereco_entrega` continuar sendo exatamente o que foi gravado.
+            pedido.endereco = _endereco_congelado(linha)
             pedido.motivo_rejeicao = linha["motivo_rejeicao"]
             pedido.observacao_ajuste = linha["observacao_ajuste"]
             if linha["pago_em"]:
@@ -314,13 +401,21 @@ class Repositorio:
             empresa.fechamento.strftime("%H:%M"),
             empresa.coordenada.latitude if empresa.coordenada else None,
             empresa.coordenada.longitude if empresa.coordenada else None,
+            # Só a marisqueira entrega, então na compradora as duas ficam nulas.
+            getattr(empresa, "prazo_preparo_horas", None),
+            (
+                str(empresa.raio_entrega_km)
+                if getattr(empresa, "raio_entrega_km", None) is not None
+                else None
+            ),
         )
         if empresa.id is None:
             cursor = self.conexao.execute(
                 """INSERT INTO empresa
                    (tipo, nome, cnpj, email, telefone, endereco, localizacao,
-                    abertura, fechamento, latitude, longitude)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    abertura, fechamento, latitude, longitude, preparo_horas,
+                    raio_entrega_km)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 dados,
             )
             empresa.id = cursor.lastrowid
@@ -328,8 +423,8 @@ class Repositorio:
             self.conexao.execute(
                 """UPDATE empresa SET tipo = ?, nome = ?, cnpj = ?, email = ?,
                    telefone = ?, endereco = ?, localizacao = ?, abertura = ?,
-                   fechamento = ?, latitude = ?, longitude = ?
-                   WHERE id = ?""",
+                   fechamento = ?, latitude = ?, longitude = ?,
+                   preparo_horas = ?, raio_entrega_km = ? WHERE id = ?""",
                 (*dados, empresa.id),
             )
         if isinstance(empresa, EmpresaMarisqueira):
@@ -341,9 +436,76 @@ class Repositorio:
                 "INSERT INTO empresa_forma_pagamento (empresa_id, forma) VALUES (?, ?)",
                 [(empresa.id, f.value) for f in empresa.formas_pagamento_aceitas],
             )
+        if isinstance(empresa, EmpresaCompradora):
+            self._gravar_enderecos(empresa)
 
         self.conexao.commit()
         self.empresas[empresa.id] = empresa
+        return empresa
+
+    def _gravar_enderecos(self, empresa: EmpresaCompradora) -> None:
+        """Põe a tabela `endereco` igual à lista da compradora.
+
+        Insere os novos, atualiza os que já têm id e apaga do banco os que
+        saíram da lista. Não apaga tudo pra reinserir porque o id do endereço
+        é o que a interface usa pra lembrar qual linha estava selecionada.
+        """
+        guardados: list[int] = []
+        for endereco in empresa.enderecos:
+            dados = (
+                empresa.id,
+                endereco.apelido,
+                endereco.logradouro,
+                endereco.numero,
+                endereco.bairro,
+                endereco.cidade,
+                endereco.uf,
+                endereco.cep,
+                endereco.complemento,
+                endereco.referencia,
+                endereco.coordenada.latitude if endereco.coordenada else None,
+                endereco.coordenada.longitude if endereco.coordenada else None,
+                1 if endereco.principal else 0,
+            )
+            if endereco.id is None:
+                cursor = self.conexao.execute(
+                    """INSERT INTO endereco
+                       (empresa_id, apelido, logradouro, numero, bairro,
+                        cidade, uf, cep, complemento, referencia, latitude,
+                        longitude, principal)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    dados,
+                )
+                endereco.id = cursor.lastrowid
+            else:
+                self.conexao.execute(
+                    """UPDATE endereco SET empresa_id = ?, apelido = ?,
+                       logradouro = ?, numero = ?, bairro = ?, cidade = ?,
+                       uf = ?, cep = ?, complemento = ?, referencia = ?,
+                       latitude = ?, longitude = ?, principal = ?
+                       WHERE id = ?""",
+                    (*dados, endereco.id),
+                )
+            guardados.append(endereco.id)
+
+        if guardados:
+            marcas = ", ".join("?" * len(guardados))
+            self.conexao.execute(
+                f"""DELETE FROM endereco
+                    WHERE empresa_id = ? AND id NOT IN ({marcas})""",
+                (empresa.id, *guardados),
+            )
+        else:
+            self.conexao.execute(
+                "DELETE FROM endereco WHERE empresa_id = ?", (empresa.id,)
+            )
+
+    def salvar_enderecos(self, empresa: EmpresaCompradora) -> EmpresaCompradora:
+        """Grava só os endereços, pra tela de cadastro não reescrever a empresa."""
+        if empresa.id is None:
+            raise ValueError("A compradora precisa estar gravada.")
+        self._gravar_enderecos(empresa)
+        self.conexao.commit()
         return empresa
 
     def salvar_produto(self, produto: Produto) -> Produto:
@@ -435,6 +597,13 @@ class Repositorio:
             pedido.pago_em.isoformat(timespec="seconds") if pedido.pago_em else None,
             pedido.coordenada_entrega.latitude if pedido.coordenada_entrega else None,
             pedido.coordenada_entrega.longitude if pedido.coordenada_entrega else None,
+            1 if pedido.prazo_confirmado else 0,
+            (
+                pedido.previsao_entrega.isoformat(timespec="seconds")
+                if pedido.previsao_entrega
+                else None
+            ),
+            *_colunas_entrega(pedido.endereco),
         )
         if pedido.id is None:
             cursor = self.conexao.execute(
@@ -443,8 +612,12 @@ class Repositorio:
                     endereco_entrega, tempo_entrega_dias, criado_em,
                     motivo_rejeicao, observacao_ajuste, forma_pagamento,
                     status_pagamento, pago_em, entrega_latitude,
-                    entrega_longitude)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    entrega_longitude, prazo_confirmado, previsao_entrega,
+                    entrega_apelido, entrega_logradouro, entrega_numero,
+                    entrega_bairro, entrega_cidade, entrega_uf, entrega_cep,
+                    entrega_complemento, entrega_referencia)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                           ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 dados,
             )
             pedido.id = cursor.lastrowid
@@ -455,7 +628,12 @@ class Repositorio:
                    tempo_entrega_dias = ?, criado_em = ?, motivo_rejeicao = ?,
                    observacao_ajuste = ?, forma_pagamento = ?,
                    status_pagamento = ?, pago_em = ?, entrega_latitude = ?,
-                   entrega_longitude = ? WHERE id = ?""",
+                   entrega_longitude = ?, prazo_confirmado = ?,
+                   previsao_entrega = ?, entrega_apelido = ?,
+                   entrega_logradouro = ?, entrega_numero = ?,
+                   entrega_bairro = ?, entrega_cidade = ?, entrega_uf = ?,
+                   entrega_cep = ?, entrega_complemento = ?,
+                   entrega_referencia = ? WHERE id = ?""",
                 (*dados, pedido.id),
             )
 

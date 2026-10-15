@@ -5,11 +5,13 @@ Regras implementadas: RN13, RN14, RN15, RN16, RN17, RN18, RN22. Fluxo: P7.
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
 from decimal import Decimal
+from math import ceil
 from typing import TYPE_CHECKING
 
 from dominio.coordenada import Coordenada
+from dominio.endereco import Endereco
 from dominio.entrega import EventoEntrega
 from dominio.enums import (
     FormaPagamento,
@@ -24,6 +26,7 @@ from dominio.excecoes import (
     TransicaoInvalida,
 )
 from dominio.item_pedido import ItemPedido
+from dominio.rota import VELOCIDADE_PADRAO_KMH, Rota
 
 if TYPE_CHECKING:
     from dominio.empresa import EmpresaCompradora, EmpresaMarisqueira
@@ -36,7 +39,17 @@ class Pedido:
     RN13 (compradora, itens, endereço e prazo; pagamento fora do escopo por
     P27), RN14 (todos os itens da mesma marisqueira) e RN16 (sem valor mínimo
     em dinheiro).
+
+    O prazo de RN13 não é digitado pela compradora. Ele sai da estimativa
+    (preparo da marisqueira mais o tempo da rota) e só vira acordo quando a
+    marisqueira aceita o pedido. Quem entrega é que sabe em quanto tempo
+    consegue entregar; deixar a compradora pedir "amanhã" seria empurrar pra
+    marisqueira um prazo que ela não tem como cumprir.
     """
+
+    # Prazo usado quando não há como estimar: sem coordenada das duas pontas,
+    # não dá pra calcular tempo de rota.
+    PRAZO_PADRAO_DIAS = 2
 
     # P7: estados do pedido e pra onde cada um pode ir.
     # AJUSTE_SOLICITADO não vai direto pra ACEITO (depois do ajuste quem
@@ -64,29 +77,43 @@ class Pedido:
     def __init__(
         self,
         compradora: EmpresaCompradora,
-        endereco_entrega: str,
-        tempo_entrega_dias: int,
+        endereco_entrega: str | Endereco,
+        tempo_entrega_dias: int | None = None,
         marisqueira: EmpresaMarisqueira | None = None,
         status: StatusPedido = StatusPedido.AGUARDANDO_ANALISE,
         status_entrega: StatusEntrega = StatusEntrega.NAO_INICIADA,
         forma_pagamento: FormaPagamento = FormaPagamento.PIX,
         status_pagamento: StatusPagamento = StatusPagamento.PENDENTE,
         coordenada_entrega: Coordenada | None = None,
+        prazo_confirmado: bool = False,
+        previsao_entrega: datetime | None = None,
         criado_em: datetime | None = None,
         id: int | None = None,
     ) -> None:
         # RN13: todos obrigatórios.
         if compradora is None:
             raise DadoObrigatorio("O perfil da empresa compradora é obrigatório.")
-        if not endereco_entrega or not endereco_entrega.strip():
+
+        # O endereço pode vir como texto ou como endereço salvo da compradora.
+        # Vindo salvo, o pedido guarda uma cópia: editar o cadastro depois não
+        # muda pra onde este pedido foi.
+        endereco_salvo: Endereco | None = None
+        if isinstance(endereco_entrega, Endereco):
+            endereco_salvo = endereco_entrega.copiar()
+            texto = endereco_salvo.linha
+            coordenada_entrega = coordenada_entrega or endereco_salvo.coordenada
+        else:
+            texto = (endereco_entrega or "").strip()
+        if not texto:
             raise DadoObrigatorio("O endereço de entrega é obrigatório.")
-        if tempo_entrega_dias is None or int(tempo_entrega_dias) <= 0:
+
+        if tempo_entrega_dias is not None and int(tempo_entrega_dias) <= 0:
             raise DadoObrigatorio("O tempo de entrega deve ser de pelo menos 1 dia.")
 
         self.id = id
         self.compradora = compradora
-        self.endereco_entrega = endereco_entrega.strip()
-        self.tempo_entrega_dias = int(tempo_entrega_dias)
+        self.endereco_entrega = texto
+        self.endereco = endereco_salvo
         self.marisqueira = marisqueira
         self.status = status
         self.status_entrega = status_entrega
@@ -94,6 +121,15 @@ class Pedido:
         self.itens: list[ItemPedido] = []
         self.motivo_rejeicao: str | None = None
         self.observacao_ajuste: str | None = None
+
+        # Prazo: o informado, ou o padrão até a estimativa ficar disponível.
+        self.tempo_entrega_dias = (
+            int(tempo_entrega_dias)
+            if tempo_entrega_dias is not None
+            else self.PRAZO_PADRAO_DIAS
+        )
+        self.prazo_confirmado = bool(prazo_confirmado)
+        self.previsao_entrega = previsao_entrega
 
         # Pagamento. Extensão além de P27, que o deixava fora do escopo.
         if not isinstance(forma_pagamento, FormaPagamento):
@@ -108,6 +144,9 @@ class Pedido:
             compradora, "coordenada", None
         )
         self.eventos_entrega: list[EventoEntrega] = []
+        # Traçado por ruas, quando alguém com acesso ao roteador informa.
+        # O domínio não busca rota: isso é chamada de rede.
+        self.rota: Rota | None = None
 
     # Métodos exigidos pela atividade
 
@@ -170,6 +209,39 @@ class Pedido:
         for item in self.itens:
             item.produto.baixar_estoque(item.quantidade_kg)
         self.status_entrega = StatusEntrega.EM_PREPARACAO
+
+    def definir_prazo_entrega(
+        self, dias: int | None = None, previsao: datetime | None = None
+    ) -> None:
+        """A marisqueira fecha o prazo, no aceite.
+
+        Sem argumento, assume a estimativa que o próprio pedido calcula. É o
+        contrário do que estava antes: o prazo passa a ser compromisso de quem
+        entrega, não pedido de quem compra.
+
+        Quando a empresa dá um número diferente do estimado, a data também
+        muda. Guardar a estimativa antiga faria o pedido prometer sete dias e
+        mostrar a data de amanhã, que é pior que não ter data nenhuma.
+        """
+        if dias is None:
+            dias = self.prazo_estimado_dias
+        if int(dias) <= 0:
+            raise DadoObrigatorio("O prazo de entrega é de pelo menos 1 dia.")
+        self.tempo_entrega_dias = int(dias)
+        estimativa = self.previsao_estimada
+        if previsao is not None:
+            self.previsao_entrega = previsao
+        elif estimativa is not None and int(dias) == self.prazo_estimado_dias:
+            # O prazo bate com a conta: fica a estimativa, que é mais fina
+            # porque sabe a hora do preparo e o tempo do trajeto.
+            self.previsao_entrega = estimativa
+        else:
+            self.previsao_entrega = self.criado_em + timedelta(days=int(dias))
+        self.prazo_confirmado = True
+
+    def definir_rota(self, rota: Rota | None) -> None:
+        """Guarda o traçado por ruas, que vem de fora do domínio."""
+        self.rota = rota
 
     def marcar_rejeitado(self, motivo: str) -> None:
         """P7: a marisqueira rejeita o pedido, com justificativa."""
@@ -354,11 +426,76 @@ class Pedido:
         )
 
     @property
+    def horas_de_preparo(self) -> int:
+        """Quanto a marisqueira leva pra separar o pedido."""
+        if self.marisqueira is None:
+            return 24
+        return int(getattr(self.marisqueira, "prazo_preparo_horas", 24))
+
+    @property
+    def minutos_de_transito(self) -> int | None:
+        """Tempo de deslocamento: da rota quando existe, da distância quando não.
+
+        Com rota por ruas sai o número do roteador, que já conta o trânsito do
+        trajeto real. Sem rota, divide a distância em linha reta pela
+        velocidade média, que é uma conta otimista e está dito que é.
+        """
+        if self.rota is not None:
+            return self.rota.duracao_minutos
+        distancia = self.distancia_total_km
+        if distancia is None:
+            return None
+        return max(1, int(distancia / Decimal(VELOCIDADE_PADRAO_KMH) * 60))
+
+    @property
+    def previsao_estimada(self) -> datetime | None:
+        """Quando a mercadoria chega, somando preparo e deslocamento."""
+        transito = self.minutos_de_transito
+        if transito is None:
+            return None
+        return self.criado_em + timedelta(hours=self.horas_de_preparo, minutes=transito)
+
+    @property
+    def prazo_estimado_dias(self) -> int:
+        """A estimativa em dias, que é o formato que RN13 pede."""
+        previsao = self.previsao_estimada
+        if previsao is None:
+            return self.PRAZO_PADRAO_DIAS
+        horas = (previsao - self.criado_em).total_seconds() / 3600
+        return max(1, ceil(horas / 24))
+
+    @property
+    def previsao_para_mostrar(self) -> datetime | None:
+        """A previsão acordada, ou a estimativa enquanto não houver acordo."""
+        return self.previsao_entrega or self.previsao_estimada
+
+    @property
+    def resumo_prazo(self) -> str:
+        """Uma linha dizendo o prazo e se ele já é compromisso.
+
+        Enquanto a marisqueira não aceita, o prazo é conta desta classe e a
+        tela precisa deixar isso claro: quem compra não escolhe a data.
+        """
+        previsao = self.previsao_para_mostrar
+        if previsao is None:
+            return f"Prazo de {self.tempo_entrega_dias} dia(s)"
+        if self.prazo_confirmado:
+            return f"Entrega até {previsao:%d/%m às %H:%M} (prazo confirmado)"
+        return f"Previsão de {previsao:%d/%m às %H:%M} (a confirmar)"
+
+    @property
     def coordenada_origem(self) -> Coordenada | None:
         return self.marisqueira.coordenada if self.marisqueira is not None else None
 
     @property
     def distancia_total_km(self) -> Decimal | None:
+        """Extensão do trajeto.
+
+        Com rota por ruas é a distância rodada; sem rota, a linha reta, que
+        subestima qualquer percurso de verdade.
+        """
+        if self.rota is not None:
+            return self.rota.distancia_km
         origem = self.coordenada_origem
         if origem is None:
             return None
@@ -379,20 +516,49 @@ class Pedido:
 
     @property
     def distancia_restante_km(self) -> Decimal | None:
+        """Quanto falta rodar. Pela rota quando há rota, senão em linha reta."""
+        if self.rota is not None:
+            falta = self.rota.extensao * (
+                Decimal("1") - Decimal(str(round(self.fracao_percorrida, 4)))
+            )
+            return falta.quantize(Decimal("0.1"))
         posicao = self.posicao_atual
         if posicao is None:
             return None
         return posicao.distancia_km(self.coordenada_entrega)
 
     @property
-    def progresso_percentual(self) -> int:
-        """Quanto do trajeto já foi andado, de 0 a 100."""
+    def minutos_restantes(self) -> int | None:
+        """Quanto tempo falta, na proporção do que ainda não foi rodado."""
+        transito = self.minutos_de_transito
+        if transito is None:
+            return None
+        return max(0, int(transito * (1 - self.fracao_percorrida)))
+
+    @property
+    def fracao_percorrida(self) -> float:
+        """Quanto da rota já foi andado, de 0 a 1.
+
+        Com rota, projeta a última posição sobre o traçado: numa rota que faz
+        volta, a distância que falta em linha reta não diz quanto já se andou.
+        """
+        if self.status is StatusPedido.ENTREGUE:
+            return 1.0
+        posicao = self.posicao_atual
+        if posicao is None:
+            return 0.0
+        if self.rota is not None:
+            return self.rota.fracao_de(posicao)
         total = self.distancia_total_km
         restante = self.distancia_restante_km
         if not total or total <= 0 or restante is None:
-            return 100 if self.status is StatusPedido.ENTREGUE else 0
-        andado = max(Decimal("0"), total - restante)
-        return int(min(Decimal("100"), andado / total * 100))
+            return 0.0
+        return float(max(Decimal("0"), total - restante) / total)
+
+    @property
+    def progresso_percentual(self) -> int:
+        """Quanto do trajeto já foi andado, de 0 a 100."""
+        return max(0, min(100, int(self.fracao_percorrida * 100)))
 
     @property
     def em_transito(self) -> bool:

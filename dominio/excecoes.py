@@ -66,3 +66,12 @@ class AvaliacaoInvalida(ErroDeNegocio):
 
 class AcessoNaoAutorizado(ErroDeNegocio):
     """RN12: a marisqueira só visualiza e altera os próprios produtos."""
+
+
+class ForaDeAreaDeEntrega(ErroDeNegocio):
+    """O endereço está além do raio que a empresa entrega.
+
+    Extensão: os requisitos não limitam área de entrega, mas sem limite uma
+    marisqueira de uma pessoa (RN03) recebe pedido de qualquer canto do
+    estado e fica no prejuízo do frete, que RN23 manda embutir no preço.
+    """

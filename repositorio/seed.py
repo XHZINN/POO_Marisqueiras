@@ -15,8 +15,10 @@ from dominio.coordenada import (
     RAPOSA,
     SAO_LUIS_CENTRO,
     VILA_MARESIA,
+    Coordenada,
 )
 from dominio.empresa import EmpresaCompradora, EmpresaMarisqueira
+from dominio.endereco import Endereco
 from dominio.enums import (
     Categoria,
     FormaPagamento,
@@ -82,7 +84,7 @@ def popular(repo: Repositorio) -> None:
             coordenada=SAO_LUIS_CENTRO,
         )
     )
-    repo.salvar_empresa(
+    peixaria = repo.salvar_empresa(
         EmpresaCompradora(
             nome="Peixaria Central Distribuidora",
             cnpj="55.555.555/0001-55",
@@ -93,6 +95,58 @@ def popular(repo: Repositorio) -> None:
             coordenada=MERCADO_DO_PEIXE,
         )
     )
+
+    # Condições de entrega: quem entrega é que define prazo de preparo e
+    # até onde vai. Dona Rosa trabalha sozinha (RN03), então leva mais tempo
+    # pra preparar e não sai da ilha; o Araçagi é entreposto e entrega longe.
+    maresia.configurar_entrega(prazo_preparo_horas=12, raio_entrega_km=40)
+    dona_rosa.configurar_entrega(prazo_preparo_horas=36, raio_entrega_km=30)
+    aracagi.configurar_entrega(prazo_preparo_horas=8)
+    for empresa in (maresia, dona_rosa, aracagi):
+        repo.salvar_empresa(empresa)
+
+    # Endereços de entrega cadastrados, pra compra não pedir endereço digitado.
+    giz = mare_alta.adicionar_endereco(
+        Endereco(
+            apelido="Restaurante",
+            logradouro="Rua do Giz",
+            numero="120",
+            bairro="Centro",
+            cidade="São Luís",
+            cep="65010-680",
+            referencia="Esquina com a Rua da Estrela",
+            coordenada=SAO_LUIS_CENTRO,
+            principal=True,
+        )
+    )
+    litoranea = mare_alta.adicionar_endereco(
+        Endereco(
+            apelido="Filial Litorânea",
+            logradouro="Av. Litorânea",
+            numero="1200",
+            bairro="São Marcos",
+            cidade="São Luís",
+            cep="65077-010",
+            complemento="Quiosque 4",
+            coordenada=Coordenada(-2.488864, -44.293273),
+        )
+    )
+    repo.salvar_enderecos(mare_alta)
+
+    peixaria.adicionar_endereco(
+        Endereco(
+            apelido="Box do Mercado",
+            logradouro="Mercado do Peixe",
+            numero="14",
+            bairro="Centro",
+            cidade="Raposa",
+            cep="65138-000",
+            complemento="Box 14",
+            coordenada=MERCADO_DO_PEIXE,
+            principal=True,
+        )
+    )
+    repo.salvar_enderecos(peixaria)
 
     # Produtos (RN04, RN05, RN06)
     # RN06: sururu fresco e congelado são dois produtos distintos.
@@ -227,8 +281,7 @@ def popular(repo: Repositorio) -> None:
     # Pedido entregue e avaliado, para a média de estrelas existir (RN11).
     entregue = mare_alta.realizar_pedido(
         [(produtos[0], Decimal("60")), (produtos[2], Decimal("40"))],
-        "Rua do Giz, 120, Centro, São Luís/MA",
-        3,
+        giz,
     )
     maresia.aceitar_pedido(entregue)
     mare_alta.informar_pagamento(entregue)
@@ -244,8 +297,7 @@ def popular(repo: Repositorio) -> None:
 
     entregue_rosa = mare_alta.realizar_pedido(
         [(produtos[4], Decimal("50"))],
-        "Rua do Giz, 120, Centro, São Luís/MA",
-        2,
+        giz,
     )
     dona_rosa.aceitar_pedido(entregue_rosa)
     mare_alta.informar_pagamento(entregue_rosa)
@@ -262,16 +314,14 @@ def popular(repo: Repositorio) -> None:
     # Pedido aguardando análise, para a marisqueira ter o que decidir ao abrir.
     pendente = mare_alta.realizar_pedido(
         [(produtos[3], Decimal("80"))],
-        "Rua do Giz, 120, Centro, São Luís/MA",
-        4,
+        giz,
     )
     repo.salvar_pedido(pendente)
 
     # Pedido com ajuste solicitado: a compradora precisa responder (P7).
     em_ajuste = mare_alta.realizar_pedido(
         [(produtos[8], Decimal("100"))],
-        "Rua do Giz, 120, Centro, São Luís/MA",
-        5,
+        litoranea,
     )
     aracagi.solicitar_ajuste(
         em_ajuste,
@@ -282,18 +332,15 @@ def popular(repo: Repositorio) -> None:
     # Pedido despachado: a compradora precisa confirmar o recebimento (RN22).
     em_rota = mare_alta.realizar_pedido(
         [(produtos[9], Decimal("90"))],
-        "Rua do Giz, 120, Centro, São Luís/MA",
-        2,
+        giz,
         forma_pagamento=FormaPagamento.BOLETO_PRAZO,  # sai antes de pagar
     )
     aracagi.aceitar_pedido(em_rota)
     aracagi.atualizar_status_entrega(em_rota, StatusEntrega.SAIU_PARA_ENTREGA)
-    # Trajeto já iniciado, para o mapa abrir com algo desenhado.
+    # Só a saída fica semeada. O resto do trajeto quem desenha é a simulação,
+    # que anda pela rota de ruas de verdade: ponto inventado no meio do
+    # caminho cairia fora da rua.
     origem = em_rota.coordenada_origem
-    destino = em_rota.coordenada_entrega
-    if origem is not None and destino is not None:
+    if origem is not None:
         aracagi.registrar_posicao(em_rota, origem, "Saída do entreposto")
-        aracagi.registrar_posicao(
-            em_rota, origem.interpolar(destino, 0.35), "Na MA-203"
-        )
     repo.salvar_pedido(em_rota)

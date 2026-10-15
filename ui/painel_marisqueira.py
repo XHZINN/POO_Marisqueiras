@@ -24,7 +24,9 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QListWidget,
+    QMessageBox,
     QPushButton,
+    QSpinBox,
     QTabWidget,
     QVBoxLayout,
     QWidget,
@@ -40,6 +42,7 @@ from dominio.enums import (
 )
 from dominio.pedido import Pedido
 from dominio.produto import Produto
+from geo.roteador import roteador
 from repositorio.repositorio import Repositorio
 from ui.componentes import (
     cartao,
@@ -55,6 +58,7 @@ from ui.componentes import (
     pilula_status,
     protegido,
     reais,
+    rolavel,
     rotulo_secao,
     tabela,
 )
@@ -133,6 +137,160 @@ class DialogoOrigem(QDialog):
             "responsavel": self.in_responsavel.text(),
             "metodo": self.in_metodo.currentData(),
             "observacoes": self.in_observacoes.text(),
+        }
+
+
+class DialogoPrazo(QDialog):
+    """Fecha o prazo na hora de aceitar o pedido.
+
+    Extensão sobre RN13: nos requisitos o prazo é um campo que a compradora
+    preenche, o que não faz sentido — quem conhece a própria agenda e a
+    distância até o destino é quem vende. Aqui a compradora vê uma
+    estimativa e a marisqueira transforma essa estimativa em compromisso.
+    """
+
+    def __init__(self, pai, pedido: Pedido) -> None:
+        super().__init__(pai)
+        self.setWindowTitle("Aceitar pedido")
+        self.setMinimumWidth(420)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(26, 24, 26, 20)
+        layout.setSpacing(14)
+        titulo = QLabel(f"Pedido {pedido.id} · {pedido.compradora.nome}")
+        titulo.setObjectName("nomeEmpresa")
+        layout.addWidget(titulo)
+
+        estimativa = QLabel(self._estimativa(pedido))
+        estimativa.setObjectName("meta")
+        estimativa.setWordWrap(True)
+        layout.addWidget(estimativa)
+
+        formulario = QFormLayout()
+        formulario.setSpacing(12)
+        self.in_dias = QSpinBox()
+        self.in_dias.setRange(1, 30)
+        self.in_dias.setSuffix(" dia(s)")
+        self.in_dias.setValue(pedido.prazo_estimado_dias)
+        formulario.addRow("Prazo que você assume", self.in_dias)
+        layout.addLayout(formulario)
+
+        aviso = QLabel(
+            "A compradora é avisada do prazo fechado. Depois de aceito, este "
+            "é o compromisso que aparece no pedido dela."
+        )
+        aviso.setObjectName("meta")
+        aviso.setWordWrap(True)
+        layout.addWidget(aviso)
+
+        botoes = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        botoes.button(QDialogButtonBox.StandardButton.Ok).setText("Aceitar pedido")
+        botoes.button(QDialogButtonBox.StandardButton.Cancel).setText("Cancelar")
+        botoes.button(QDialogButtonBox.StandardButton.Cancel).setObjectName(
+            "secundario"
+        )
+        botoes.accepted.connect(self.accept)
+        botoes.rejected.connect(self.reject)
+        layout.addWidget(botoes)
+
+    @staticmethod
+    def _estimativa(pedido: Pedido) -> str:
+        """De onde sai o número sugerido, item por item."""
+        linhas = [f"Destino: {pedido.endereco_entrega}"]
+        linhas.append(f"Seu preparo: {pedido.horas_de_preparo} h")
+        distancia = pedido.distancia_total_km
+        minutos = pedido.minutos_de_transito
+        if distancia is not None and minutos is not None:
+            por_ruas = pedido.rota is not None and pedido.rota.por_ruas
+            modo = "por ruas" if por_ruas else "em linha reta"
+            linhas.append(f"Trajeto: {distancia} km {modo}, cerca de {minutos} min")
+        else:
+            linhas.append("Trajeto: sem coordenada do destino, não dá pra medir")
+        previsao = pedido.previsao_estimada
+        if previsao is not None:
+            linhas.append(f"Isso dá {previsao:%d/%m às %H:%M}")
+        return "\n".join(linhas)
+
+    @property
+    def prazo_dias(self) -> int:
+        return self.in_dias.value()
+
+
+class DialogoCondicoesEntrega(QDialog):
+    """Preparo e alcance da marisqueira. Extensão além de P10 e RN13.
+
+    São os dois números que decidem o prazo de todo pedido novo: por isso
+    ficam no cadastro da empresa e não no pedido.
+    """
+
+    SEM_RAIO = "Entrego em qualquer distância"
+
+    def __init__(self, pai, empresa: EmpresaMarisqueira) -> None:
+        super().__init__(pai)
+        self.empresa = empresa
+        self.setWindowTitle("Condições de entrega")
+        self.setMinimumWidth(440)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(26, 24, 26, 20)
+        layout.setSpacing(14)
+        titulo = QLabel(empresa.nome)
+        titulo.setObjectName("nomeEmpresa")
+        layout.addWidget(titulo)
+
+        formulario = QFormLayout()
+        formulario.setSpacing(12)
+        self.in_preparo = QSpinBox()
+        self.in_preparo.setRange(1, 240)
+        self.in_preparo.setSuffix(" h")
+        self.in_preparo.setValue(empresa.prazo_preparo_horas)
+        self.in_raio = QDoubleSpinBox()
+        self.in_raio.setRange(0.0, 500.0)
+        self.in_raio.setDecimals(1)
+        self.in_raio.setSingleStep(5.0)
+        self.in_raio.setSuffix(" km")
+        self.in_raio.setSpecialValueText(self.SEM_RAIO)
+        self.in_raio.setValue(float(empresa.raio_entrega_km or 0))
+        formulario.addRow("Tempo de preparo", self.in_preparo)
+        formulario.addRow("Raio de entrega", self.in_raio)
+        layout.addLayout(formulario)
+
+        aviso = QLabel(
+            "O preparo entra na previsão de todo pedido novo. O raio recusa, "
+            "na hora da compra, endereço fora do seu alcance — zero quilômetro "
+            f"significa “{self.SEM_RAIO.lower()}”."
+        )
+        aviso.setObjectName("meta")
+        aviso.setWordWrap(True)
+        layout.addWidget(aviso)
+
+        botoes = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        botoes.button(QDialogButtonBox.StandardButton.Ok).setText("Salvar")
+        botoes.button(QDialogButtonBox.StandardButton.Cancel).setText("Cancelar")
+        botoes.button(QDialogButtonBox.StandardButton.Cancel).setObjectName(
+            "secundario"
+        )
+        botoes.accepted.connect(self.accept)
+        botoes.rejected.connect(self.reject)
+        layout.addWidget(botoes)
+
+    @property
+    def dados(self) -> dict:
+        """Argumentos de `configurar_entrega`.
+
+        Raio zero é `limpar_raio`, não `raio_entrega_km=0`: o domínio recusa
+        raio zero de propósito, porque uma empresa que não entrega em lugar
+        nenhum não é o que se quis dizer.
+        """
+        raio = Decimal(str(round(self.in_raio.value(), 1)))
+        return {
+            "prazo_preparo_horas": self.in_preparo.value(),
+            "raio_entrega_km": raio if raio > 0 else None,
+            "limpar_raio": raio == 0,
         }
 
 
@@ -326,6 +484,20 @@ class PainelMarisqueira(QWidget):
 
         esquerda = QVBoxLayout()
         esquerda.setSpacing(12)
+
+        # As condições ficam à vista nesta aba porque é delas que sai o prazo
+        # sugerido na hora de aceitar cada pedido.
+        topo = QHBoxLayout()
+        self.lbl_condicoes = QLabel()
+        self.lbl_condicoes.setObjectName("meta")
+        topo.addWidget(self.lbl_condicoes)
+        topo.addStretch()
+        self.btn_condicoes = QPushButton("Condições de entrega")
+        self.btn_condicoes.setObjectName("secundario")
+        self.btn_condicoes.clicked.connect(self._editar_condicoes)
+        topo.addWidget(self.btn_condicoes)
+        esquerda.addLayout(topo)
+
         self.tbl_pedidos = tabela(
             [
                 "Pedido",
@@ -341,7 +513,7 @@ class PainelMarisqueira(QWidget):
         self.tbl_pedidos.itemSelectionChanged.connect(self._pedido_selecionado_mudou)
         esquerda.addWidget(self.tbl_pedidos)
         layout.addLayout(esquerda, 3)
-        layout.addWidget(self._detalhe_pedido(), 2)
+        layout.addWidget(rolavel(self._detalhe_pedido()), 2)
         return pagina
 
     def _detalhe_pedido(self) -> QWidget:
@@ -454,12 +626,36 @@ class PainelMarisqueira(QWidget):
         pedido = self._pedido_selecionado()
         if pedido is None:
             return
+        # A rota entra antes do diálogo pra estimativa sair do trajeto real.
+        if pedido.rota is None:
+            pedido.definir_rota(
+                roteador().rota(pedido.coordenada_origem, pedido.coordenada_entrega)
+            )
+        dialogo = DialogoPrazo(self, pedido)
+        if dialogo.exec() != QDialog.DialogCode.Accepted:
+            return
+        prazo = dialogo.prazo_dias
 
         def acao() -> None:
-            self.empresa.aceitar_pedido(pedido)  # RN18, baixa o estoque
+            # RN18 baixa o estoque; o prazo vira compromisso aqui.
+            self.empresa.aceitar_pedido(pedido, prazo_dias=prazo)
             self.repo.salvar_pedido(pedido)
 
-        if protegido(self, acao, "Pedido aceito. O estoque foi atualizado."):
+        aviso = f"Pedido aceito com prazo de {prazo} dia(s). Estoque atualizado."
+        if protegido(self, acao, aviso):
+            self.ao_alterar()
+
+    def _editar_condicoes(self) -> None:
+        """Extensão: os números que decidem o prazo ficam aqui."""
+        dialogo = DialogoCondicoesEntrega(self, self.empresa)
+        if dialogo.exec() != QDialog.DialogCode.Accepted:
+            return
+
+        def acao() -> None:
+            self.empresa.configurar_entrega(**dialogo.dados)
+            self.repo.salvar_empresa(self.empresa)
+
+        if protegido(self, acao, "Condições de entrega salvas."):
             self.ao_alterar()
 
     def _rejeitar_pedido(self) -> None:
@@ -526,8 +722,20 @@ class PainelMarisqueira(QWidget):
             self.empresa.atualizar_status_entrega(pedido, novo)
             self.repo.salvar_pedido(pedido)
 
-        if protegido(self, acao):
-            self.ao_alterar()
+        if not protegido(self, acao):
+            return
+        self.ao_alterar()
+        # Despachou: a entrega começa a andar agora, então a tela de
+        # acompanhamento é oferecida em vez de ficar esperando o clique.
+        if novo is StatusEntrega.SAIU_PARA_ENTREGA:
+            resposta = QMessageBox.question(
+                self,
+                "Saiu para entrega",
+                "Acompanhar o entregador no mapa agora?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            )
+            if resposta is QMessageBox.StandardButton.Yes:
+                self._simular_entrega()
 
     # Aba 3: avaliações recebidas (RN21)
 
@@ -551,6 +759,7 @@ class PainelMarisqueira(QWidget):
     # Atualização das telas
 
     def atualizar(self) -> None:
+        self._atualizar_condicoes()
         self._atualizar_produtos()
         self._atualizar_pedidos()
         self._atualizar_avaliacoes()
@@ -558,6 +767,16 @@ class PainelMarisqueira(QWidget):
         self._pedido_selecionado_mudou()
         self.painel_notificacoes.atualizar()
         self._atualizar_titulo_avisos()
+
+    def _atualizar_condicoes(self) -> None:
+        alcance = (
+            f"entrega até {self.empresa.raio_entrega_km} km"
+            if self.empresa.raio_entrega_km is not None
+            else "entrega sem limite de distância"
+        )
+        self.lbl_condicoes.setText(
+            f"Preparo de {self.empresa.prazo_preparo_horas} h · {alcance}"
+        )
 
     def _atualizar_titulo_avisos(self) -> None:
         """O contador no título da aba é o aviso de que algo chegou."""

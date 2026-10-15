@@ -20,7 +20,33 @@ CREATE TABLE IF NOT EXISTS empresa (
     fechamento   TEXT NOT NULL,
     -- Posição real. Extensão além de P10.
     latitude     REAL,
-    longitude    REAL
+    longitude    REAL,
+    -- Condições de entrega da marisqueira: quanto leva pra preparar e até
+    -- onde entrega. Nulo na compradora, que não entrega nada.
+    preparo_horas    INTEGER,
+    raio_entrega_km  TEXT
+);
+
+-- Endereços de entrega salvos da compradora. Extensão: os requisitos tratam
+-- o endereço como campo de texto do pedido (RN13), e aqui ele é cadastro.
+CREATE TABLE IF NOT EXISTS endereco (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    empresa_id   INTEGER NOT NULL REFERENCES empresa(id) ON DELETE CASCADE,
+    apelido      TEXT NOT NULL,
+    logradouro   TEXT NOT NULL,
+    numero       TEXT NOT NULL,
+    bairro       TEXT NOT NULL,
+    cidade       TEXT NOT NULL,
+    uf           TEXT NOT NULL,
+    cep          TEXT,
+    complemento  TEXT,
+    referencia   TEXT,
+    latitude     REAL,
+    longitude    REAL,
+    principal    INTEGER NOT NULL DEFAULT 0,
+    -- O apelido é como a pessoa escolhe o endereço na hora da compra, então
+    -- dois "Matriz" na mesma empresa não serve.
+    UNIQUE (empresa_id, apelido)
 );
 
 CREATE TABLE IF NOT EXISTS produto (
@@ -56,7 +82,23 @@ CREATE TABLE IF NOT EXISTS pedido (
     pago_em             TEXT,
     -- Destino da entrega. Extensão além de P10.
     entrega_latitude    REAL,
-    entrega_longitude   REAL
+    entrega_longitude   REAL,
+    -- Cópia do endereço escolhido no momento da compra, mesma ideia de RN07
+    -- com o preço: editar o cadastro amanhã não reescreve para onde este
+    -- pedido foi. Nulo quando o endereço foi digitado como texto solto.
+    entrega_apelido     TEXT,
+    entrega_logradouro  TEXT,
+    entrega_numero      TEXT,
+    entrega_bairro      TEXT,
+    entrega_cidade      TEXT,
+    entrega_uf          TEXT,
+    entrega_cep         TEXT,
+    entrega_complemento TEXT,
+    entrega_referencia  TEXT,
+    -- Prazo: `tempo_entrega_dias` é estimativa até a marisqueira aceitar, e
+    -- aí `prazo_confirmado` marca que virou compromisso.
+    prazo_confirmado    INTEGER NOT NULL DEFAULT 0,
+    previsao_entrega    TEXT
 );
 
 CREATE TABLE IF NOT EXISTS item_pedido (
@@ -140,3 +182,4 @@ CREATE INDEX IF NOT EXISTS idx_produto_empresa ON produto(empresa_id);
 CREATE INDEX IF NOT EXISTS idx_pedido_marisqueira ON pedido(marisqueira_id);
 CREATE INDEX IF NOT EXISTS idx_pedido_compradora ON pedido(compradora_id);
 CREATE INDEX IF NOT EXISTS idx_item_pedido ON item_pedido(pedido_id);
+CREATE INDEX IF NOT EXISTS idx_endereco_empresa ON endereco(empresa_id);

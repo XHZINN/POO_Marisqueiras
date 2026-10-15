@@ -17,6 +17,7 @@ from decimal import Decimal
 
 from dominio.avaliacao import Avaliacao
 from dominio.coordenada import Coordenada
+from dominio.endereco import Endereco
 from dominio.entrega import EventoEntrega
 from dominio.enums import (
     Categoria,
@@ -32,6 +33,7 @@ from dominio.excecoes import (
     AcessoNaoAutorizado,
     AvaliacaoInvalida,
     DadoObrigatorio,
+    ForaDeAreaDeEntrega,
     PrecoAlteradoEmVenda,
     QuantidadeInvalida,
     TransicaoInvalida,
@@ -40,6 +42,7 @@ from dominio.notificacao import Notificacao
 from dominio.pedido import Pedido
 from dominio.produto import Produto
 from dominio.rastreabilidade import Rastreabilidade
+from dominio.rota import Rota
 
 
 class Empresa(ABC):
@@ -154,6 +157,10 @@ class EmpresaMarisqueira(Empresa):
     no Pedido.
     """
 
+    # Quanto a empresa leva pra separar e despachar um pedido. Entra no
+    # cálculo do prazo: sem isso, o prazo seria só tempo de estrada.
+    PREPARO_PADRAO_HORAS = 24
+
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         self.produtos: list[Produto] = []
@@ -162,6 +169,46 @@ class EmpresaMarisqueira(Empresa):
         # Extensão além de P27. Por padrão aceita tudo; a empresa restringe
         # se quiser, e o pedido valida contra esta lista.
         self.formas_pagamento_aceitas: set[FormaPagamento] = set(FormaPagamento)
+        # Condições de entrega que são decisão de quem entrega. Marisqueira
+        # pequena (RN03 permite empresa de uma pessoa) não tem como atender
+        # qualquer endereço em qualquer prazo.
+        self.prazo_preparo_horas = self.PREPARO_PADRAO_HORAS
+        self.raio_entrega_km: Decimal | None = None
+
+    def configurar_entrega(
+        self,
+        prazo_preparo_horas: int | None = None,
+        raio_entrega_km: Decimal | int | None = None,
+        limpar_raio: bool = False,
+    ) -> None:
+        """Define preparo e alcance da entrega.
+
+        `limpar_raio` existe porque `None` no parâmetro significa "não mexe",
+        e precisa de um jeito de dizer "passei a entregar em qualquer lugar".
+        """
+        if prazo_preparo_horas is not None:
+            if int(prazo_preparo_horas) < 1:
+                raise DadoObrigatorio("O preparo é de pelo menos 1 hora.")
+            self.prazo_preparo_horas = int(prazo_preparo_horas)
+        if limpar_raio:
+            self.raio_entrega_km = None
+        elif raio_entrega_km is not None:
+            if Decimal(str(raio_entrega_km)) <= 0:
+                raise DadoObrigatorio("O raio de entrega precisa ser maior que zero.")
+            self.raio_entrega_km = Decimal(str(raio_entrega_km))
+
+    def atende(self, destino: Coordenada | None) -> bool:
+        """O endereço cabe na área que esta empresa entrega?
+
+        Sem raio definido, entrega em qualquer lugar. Sem coordenada das duas
+        pontas, não dá pra dizer que não atende, então aceita.
+        """
+        if self.raio_entrega_km is None:
+            return True
+        if self.coordenada is None or destino is None:
+            return True
+        distancia = self.coordenada.distancia_km(destino)
+        return distancia is not None and distancia <= self.raio_entrega_km
 
     def tipo(self) -> str:
         return "Empresa das marisqueiras"
@@ -230,6 +277,19 @@ class EmpresaMarisqueira(Empresa):
         if pedido.marisqueira is not self:
             raise AcessoNaoAutorizado(f"Este pedido não é destinado a '{self.nome}'.")
         pedido.validar_para_envio()  # RN13 / RN15 / RN18
+        if not self.atende(pedido.coordenada_entrega):
+            # A distância é medida até o endereço escolhido no pedido, não até
+            # a sede da compradora: ela pode receber em vários lugares.
+            distancia = (
+                self.coordenada.distancia_km(pedido.coordenada_entrega)
+                if self.coordenada is not None
+                else None
+            )
+            raise ForaDeAreaDeEntrega(
+                f"{self.nome} entrega em até {self.raio_entrega_km} km e este "
+                f"endereço está a {distancia} km. Escolha outro endereço de "
+                "entrega ou outra empresa."
+            )
         if pedido not in self.pedidos_recebidos:
             self.pedidos_recebidos.append(pedido)
         pedido.status = StatusPedido.AGUARDANDO_ANALISE
@@ -240,15 +300,24 @@ class EmpresaMarisqueira(Empresa):
             pedido,
         )
 
-    def aceitar_pedido(self, pedido: Pedido) -> None:
-        """P7 / RN18: aceita o pedido e baixa o estoque dos itens."""
+    def aceitar_pedido(self, pedido: Pedido, prazo_dias: int | None = None) -> None:
+        """P7 / RN18: aceita o pedido, baixa o estoque e fecha o prazo.
+
+        O prazo se fecha aqui porque é neste momento que a empresa assume o
+        compromisso. Sem `prazo_dias`, vale a estimativa do próprio pedido;
+        com, vale o que a empresa disse, que é quem conhece a própria agenda.
+        """
         self._exigir_pedido_proprio(pedido)
         pedido.validar_para_envio()  # o estoque pode ter mudado desde o envio
         pedido.marcar_aceito()
+        pedido.definir_prazo_entrega(prazo_dias)
+
+        previsao = pedido.previsao_entrega
+        quando = f" Previsão: {previsao:%d/%m às %H:%M}." if previsao else ""
         pedido.compradora.notificar(
             TipoNotificacao.PEDIDO_ACEITO,
-            f"{self.nome} aceitou seu pedido. Prazo de entrega de "
-            f"{pedido.tempo_entrega_dias} dia(s).",
+            f"{self.nome} aceitou seu pedido e fechou o prazo em "
+            f"{pedido.tempo_entrega_dias} dia(s).{quando}",
             pedido,
         )
 
@@ -449,9 +518,76 @@ class EmpresaCompradora(Empresa):
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         self.pedidos: list[Pedido] = []
+        # Endereços de entrega cadastrados. Uma compradora entrega em vários
+        # lugares (matriz, restaurante, depósito) e não vai digitar o endereço
+        # a cada compra.
+        self.enderecos: list[Endereco] = []
 
     def tipo(self) -> str:
         return "Empresa compradora"
+
+    # Endereços salvos
+
+    def adicionar_endereco(self, endereco: Endereco) -> Endereco:
+        """Guarda um endereço de entrega.
+
+        O primeiro vira o principal sozinho: cadastro com um endereço e
+        nenhum marcado como padrão deixaria a compra sem destino.
+        """
+        if endereco is None:
+            raise DadoObrigatorio("Informe o endereço.")
+        iguais = [
+            e
+            for e in self.enderecos
+            if e.apelido.casefold() == endereco.apelido.casefold()
+        ]
+        if iguais:
+            raise DadoObrigatorio(
+                f"Já existe um endereço com o apelido '{endereco.apelido}'."
+            )
+        if not self.enderecos:
+            endereco.principal = True
+        elif endereco.principal:
+            for outro in self.enderecos:
+                outro.principal = False
+        self.enderecos.append(endereco)
+        return endereco
+
+    def definir_endereco_principal(self, endereco: Endereco) -> Endereco:
+        """Escolhe o endereço que a compra usa por padrão."""
+        if endereco not in self.enderecos:
+            raise AcessoNaoAutorizado(
+                f"O endereço '{getattr(endereco, 'apelido', '')}' não é "
+                f"de '{self.nome}'."
+            )
+        for outro in self.enderecos:
+            outro.principal = outro is endereco
+        return endereco
+
+    def remover_endereco(self, endereco: Endereco) -> None:
+        """Tira um endereço do cadastro.
+
+        Os pedidos antigos não se perdem: cada um guarda a própria cópia do
+        endereço, então apagar o cadastro não apaga o histórico.
+        """
+        if endereco not in self.enderecos:
+            raise AcessoNaoAutorizado("Este endereço não é desta empresa.")
+        if len(self.enderecos) == 1:
+            raise DadoObrigatorio(
+                "Esta é a única entrega cadastrada. Cadastre outra antes de "
+                "remover esta."
+            )
+        era_principal = endereco.principal
+        self.enderecos.remove(endereco)
+        if era_principal:
+            self.enderecos[0].principal = True
+
+    @property
+    def endereco_principal(self) -> Endereco | None:
+        for endereco in self.enderecos:
+            if endereco.principal:
+                return endereco
+        return self.enderecos[0] if self.enderecos else None
 
     # Métodos exigidos pela atividade
 
@@ -547,29 +683,38 @@ class EmpresaCompradora(Empresa):
     def realizar_pedido(
         self,
         itens: list[tuple[Produto, Decimal]],
-        endereco_entrega: str,
-        tempo_entrega_dias: int,
+        endereco_entrega: str | Endereco | None = None,
         forma_pagamento: FormaPagamento = FormaPagamento.PIX,
+        rota: Rota | None = None,
     ) -> Pedido:
         """RN13 a RN18 e P27: monta e envia o pedido.
 
         `itens` é uma lista de pares (produto, quantidade_kg). Valida tudo antes
         de passar pra marisqueira, então não existe pedido meio criado. O estoque
         só baixa no aceite, porque antes disso a venda ainda pode não acontecer.
+
+        Sem endereço, usa o principal do cadastro. Não há parâmetro de prazo:
+        o prazo de RN13 entra como estimativa calculada e quem fecha é a
+        marisqueira, no aceite. `rota` é opcional e serve pra estimativa sair
+        pelo caminho real; quem tem acesso ao roteador é a interface.
         """
         if not itens:
             raise DadoObrigatorio("Adicione pelo menos um produto ao pedido.")
 
+        destino = endereco_entrega or self.endereco_principal or self.endereco
         pedido = Pedido(
             compradora=self,
-            endereco_entrega=endereco_entrega,
-            tempo_entrega_dias=tempo_entrega_dias,
+            endereco_entrega=destino,
             forma_pagamento=forma_pagamento,
         )
         for produto, quantidade in itens:
             pedido.adicionar_item(produto, quantidade)  # RN14 / RN15 / RN18
 
         pedido.validar_para_envio()
+        # A estimativa precisa da marisqueira, que só é conhecida depois do
+        # primeiro item (RN14).
+        pedido.definir_rota(rota)
+        pedido.tempo_entrega_dias = pedido.prazo_estimado_dias
 
         marisqueira = pedido.marisqueira
         if marisqueira is None:
@@ -712,12 +857,7 @@ class EmpresaCompradora(Empresa):
     def _ordenar(
         self, produtos: list[Produto], ordenar_por: OrdenacaoBusca | None
     ) -> list[Produto]:
-        """RN11 / P22: menor preço, maior preço, melhor avaliação, proximidade.
-
-        PROXIMIDADE é simplificada: produtos na mesma localização da
-        compradora vêm primeiro, depois os demais em ordem alfabética.
-        Geolocalização real está fora do escopo (P10: sem rastreamento).
-        """
+        """RN11 / P22: menor preço, maior preço, melhor avaliação, proximidade."""
         if ordenar_por is None:
             return produtos
 

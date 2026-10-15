@@ -304,14 +304,18 @@ QListWidget {{
 }}
 QListWidget::item {{
     background-color: {SUPERFICIE};
+    color: {TEXTO};
     border: 1px solid {BORDA};
     border-radius: 12px;
     margin-bottom: 10px;
 }}
 QListWidget::item:hover {{ border-color: {BORDA_FORTE}; }}
+/* O `color` aqui não é enfeite: sem ele o item selecionado herda o branco
+   do tema e o texto some no fundo claro do cartão. */
 QListWidget::item:selected {{
     border: 2px solid {PRIMARIA};
     background-color: {SUPERFICIE};
+    color: {TEXTO};
 }}
 
 QListWidget#carrinho::item {{
@@ -325,6 +329,7 @@ QListWidget#carrinho::item {{
 QListWidget#carrinho::item:selected {{
     background-color: {PRIMARIA_SUAVE};
     border: 1px solid {PRIMARIA};
+    color: {TEXTO};
 }}
 
 /* ---------------- Barras de rolagem ---------------- */

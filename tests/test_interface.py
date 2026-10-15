@@ -18,9 +18,11 @@ from PySide6.QtWidgets import (
     QMessageBox,
 )
 
+from dominio.coordenada import Coordenada
 from dominio.enums import Categoria, OrdenacaoBusca, StatusEntrega, StatusPedido
 from repositorio.repositorio import Repositorio
 from repositorio.seed import popular
+from ui.dialogo_enderecos import DialogoEnderecos
 from ui.janela_principal import JanelaPrincipal
 from ui.painel_compradora import PainelCompradora
 from ui.painel_marisqueira import PainelMarisqueira
@@ -150,7 +152,25 @@ def test_p7_botoes_seguem_a_maquina_de_estados(app, repo):
     assert not painel.btn_rejeitar.isEnabled()
 
 
-def test_aceitar_pedido_pela_tela_baixa_estoque(app, repo):
+def _prazo_do_dialogo(monkeypatch, dias: int) -> None:
+    """Responde o diálogo de prazo sem abrir janela modal."""
+
+    class DialogoFalso:
+        def __init__(self, pai, pedido):
+            self.pedido = pedido
+
+        def exec(self):
+            return QDialog.DialogCode.Accepted
+
+        @property
+        def prazo_dias(self):
+            return dias
+
+    monkeypatch.setattr("ui.painel_marisqueira.DialogoPrazo", DialogoFalso)
+
+
+def test_aceitar_pedido_pela_tela_baixa_estoque(app, repo, monkeypatch):
+    _prazo_do_dialogo(monkeypatch, 3)
     marisqueira = next(e for e in repo.marisqueiras if "Maresia" in e.nome)
     painel = PainelMarisqueira(marisqueira, repo, lambda: None)
     linha = next(
@@ -168,6 +188,41 @@ def test_aceitar_pedido_pela_tela_baixa_estoque(app, repo):
 
     assert pedido.status is StatusPedido.ACEITO
     assert produto.quantidade_disponivel_kg == estoque_antes - quantidade
+    # Extensão sobre RN13: é o aceite da marisqueira que fecha o prazo.
+    assert pedido.prazo_confirmado
+    assert pedido.tempo_entrega_dias == 3
+    assert pedido.previsao_entrega is not None
+
+
+def test_condicoes_de_entrega_pela_tela(app, repo, monkeypatch):
+    """O preparo e o raio que decidem o prazo são editáveis pela empresa."""
+    marisqueira = next(e for e in repo.marisqueiras if "Maresia" in e.nome)
+    painel = PainelMarisqueira(marisqueira, repo, lambda: None)
+    assert f"{marisqueira.prazo_preparo_horas} h" in painel.lbl_condicoes.text()
+
+    class DialogoFalso:
+        def __init__(self, pai, empresa):
+            pass
+
+        def exec(self):
+            return QDialog.DialogCode.Accepted
+
+        @property
+        def dados(self):
+            return {
+                "prazo_preparo_horas": 6,
+                "raio_entrega_km": None,
+                "limpar_raio": True,
+            }
+
+    monkeypatch.setattr("ui.painel_marisqueira.DialogoCondicoesEntrega", DialogoFalso)
+    painel._editar_condicoes()
+    painel.atualizar()  # na aplicação quem redesenha é a janela principal
+
+    assert marisqueira.prazo_preparo_horas == 6
+    assert marisqueira.raio_entrega_km is None
+    assert "6 h" in painel.lbl_condicoes.text()
+    assert "sem limite" in painel.lbl_condicoes.text()
 
 
 def test_alterar_quantidade_pela_tela(app, repo, monkeypatch):
@@ -290,8 +345,10 @@ def test_pedido_completo_pela_interface(app, repo, monkeypatch):
 
     painel.tbl_busca.selectRow(0)
     painel._adicionar_ao_carrinho()
-    painel.in_endereco.setText("Rua de Teste, 99")
-    painel.in_prazo.setValue(2)
+    # O endereço vem do cadastro: o combo já está no principal e não há mais
+    # campo de prazo, porque quem compra não escolhe a data da entrega.
+    escolhido = painel._endereco_escolhido()
+    assert escolhido is compradora.endereco_principal
     painel._realizar_pedido()
     painel.atualizar()
 
@@ -301,6 +358,13 @@ def test_pedido_completo_pela_interface(app, repo, monkeypatch):
     novo = compradora.pedidos[-1]
     assert novo.id is not None
     assert novo.status is StatusPedido.AGUARDANDO_ANALISE
+    # O destino é a cópia congelada do endereço escolhido, não o texto digitado.
+    assert novo.endereco is not None
+    assert novo.endereco.apelido == escolhido.apelido
+    assert novo.endereco_entrega == escolhido.linha
+    # Prazo é estimativa da marisqueira até ela aceitar (RN13 + extensão).
+    assert not novo.prazo_confirmado
+    assert novo.tempo_entrega_dias >= 1
 
     # A marisqueira vê o pedido no painel dela.
     painel_m = PainelMarisqueira(novo.marisqueira, repo, lambda: None)
@@ -333,7 +397,7 @@ def test_rn21_avaliacao_liberada_em_pedido_entregue_sem_nota(app, repo):
     compradora = repo.compradoras[1]
     marisqueira = next(e for e in repo.marisqueiras if "Araçagi" in e.nome)
     produto = marisqueira.produtos[0]
-    pedido = compradora.realizar_pedido([(produto, Decimal("30"))], "Rua Y, 2", 2)
+    pedido = compradora.realizar_pedido([(produto, Decimal("30"))], "Rua Y, 2")
     marisqueira.aceitar_pedido(pedido)
     pedido.compradora.informar_pagamento(pedido)
     marisqueira.confirmar_pagamento(pedido)
@@ -514,7 +578,7 @@ def test_aviso_de_despacho_chega_na_compradora(app, repo):
     compradora = repo.compradoras[1]
     marisqueira = next(e for e in repo.marisqueiras if "Maresia" in e.nome)
     produto = marisqueira.produtos[0]
-    pedido = compradora.realizar_pedido([(produto, Decimal("30"))], "Rua K, 1", 2)
+    pedido = compradora.realizar_pedido([(produto, Decimal("30"))], "Rua K, 1")
     repo.salvar_pedido(pedido)
     repo.marcar_notificacoes_como_lidas(compradora)
 
@@ -537,3 +601,64 @@ def test_marisqueira_tambem_recebe_avisos(app, repo):
     marisqueira = next(e for e in repo.marisqueiras if "Maresia" in e.nome)
     painel = PainelMarisqueira(marisqueira, repo, lambda: None)
     assert painel.painel_notificacoes.tbl_notificacoes.rowCount() > 0
+
+
+# Cadastro de endereço: S/N e marcação no mapa
+
+
+@pytest.fixture
+def dialogo_enderecos(app, repo):
+    compradora = next(e for e in repo.compradoras if "Maré" in e.nome)
+    return DialogoEnderecos(None, compradora, repo)
+
+
+def test_sem_numero_preenche_e_trava_o_campo(dialogo_enderecos):
+    """Marcar S/N tem que escrever a marca, não deixar o campo vazio."""
+    dialogo = dialogo_enderecos
+    dialogo.in_numero.setText("120")
+    dialogo.chk_sem_numero.setChecked(True)
+    assert dialogo.in_numero.text() == "S/N"
+    assert not dialogo.in_numero.isEnabled()
+
+    # Desmarcar devolve o que estava digitado antes.
+    dialogo.chk_sem_numero.setChecked(False)
+    assert dialogo.in_numero.text() == "120"
+    assert dialogo.in_numero.isEnabled()
+
+
+def test_endereco_sem_numero_salva(dialogo_enderecos, repo):
+    dialogo = dialogo_enderecos
+    dialogo._novo()
+    dialogo.in_apelido.setText("Sítio")
+    dialogo.in_logradouro.setText("Estrada da Raposa")
+    dialogo.chk_sem_numero.setChecked(True)
+    dialogo.in_bairro.setText("Zona Rural")
+    dialogo._salvar()
+
+    salvo = next(e for e in dialogo.empresa.enderecos if e.apelido == "Sítio")
+    assert salvo.sem_numero
+    assert "S/N" in salvo.linha
+
+
+def test_clique_no_mapa_vira_coordenada_do_endereco(dialogo_enderecos):
+    """O ponto marcado no mapa é o que vai pro endereço na hora de salvar."""
+    dialogo = dialogo_enderecos
+    dialogo._novo()
+    assert dialogo._coordenada is None
+
+    dialogo.mapa.ponto_escolhido.emit(Coordenada(-2.5399, -44.2825))
+    assert dialogo._coordenada == Coordenada(-2.5399, -44.2825)
+    assert "marcado" in dialogo.lbl_coordenada.text().lower()
+
+
+def test_mapa_guarda_o_que_desenhar_ate_a_pagina_abrir(app):
+    """A tela desenha antes de o mapa carregar; o pedido não pode se perder."""
+    from ui.mapa_web import MapaWeb
+
+    mapa = MapaWeb()
+    mapa._pronto = False
+    mapa.definir_ponto(Coordenada(-2.53, -44.3), "Entrega")
+    assert [nome for nome, _ in mapa._fila] == ["ponto"]
+
+    # O mapa pintado é o plano B e recebe tudo junto, carregue a página ou não.
+    assert mapa.pintado.ponto == Coordenada(-2.53, -44.3)

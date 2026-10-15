@@ -4,6 +4,7 @@ from decimal import Decimal
 
 import pytest
 
+from dominio.endereco import Endereco
 from dominio.enums import Categoria, StatusEntrega, StatusPedido
 from repositorio.repositorio import Repositorio
 from repositorio.seed import popular
@@ -82,7 +83,7 @@ def test_fluxo_completo_persistido(repo, tmp_path):
     produto = marisqueira.produtos[0]
     estoque_antes = produto.quantidade_disponivel_kg
 
-    pedido = compradora.realizar_pedido([(produto, Decimal("30"))], "Rua Teste, 1", 2)
+    pedido = compradora.realizar_pedido([(produto, Decimal("30"))], "Rua Teste, 1")
     repo.salvar_pedido(pedido)
     marisqueira.aceitar_pedido(pedido)
     pedido.compradora.informar_pagamento(pedido)
@@ -166,4 +167,109 @@ def test_ajuste_e_confirmacao_persistem(repo, tmp_path):
     assert salvo.status is StatusPedido.ENTREGUE
     assert salvo.quantidade_total_kg == Decimal("60")
     assert salvo.pode_ser_avaliado
+    recarregado.fechar()
+
+
+# Extensões sobre RN13: endereços salvos, condições de entrega e prazo
+
+
+def test_enderecos_salvos_recarregam_com_apelido_e_coordenada(repo, tmp_path):
+    repo.fechar()
+    recarregado = Repositorio(tmp_path / "teste.db")
+    recarregado.carregar()
+    mare = next(e for e in recarregado.compradoras if "Maré" in e.nome)
+
+    apelidos = {e.apelido for e in mare.enderecos}
+    assert apelidos == {"Restaurante", "Filial Litorânea"}
+    principal = mare.endereco_principal
+    assert principal.apelido == "Restaurante"
+    assert principal.coordenada is not None
+    # Os campos opcionais também voltam, não só os obrigatórios.
+    filial = next(e for e in mare.enderecos if e.apelido == "Filial Litorânea")
+    assert filial.complemento == "Quiosque 4"
+    assert principal.referencia is not None
+    recarregado.fechar()
+
+
+def test_endereco_novo_e_removido_persistem(repo, tmp_path):
+    mare = next(e for e in repo.compradoras if "Maré" in e.nome)
+    antigo = next(e for e in mare.enderecos if e.apelido == "Filial Litorânea")
+    mare.adicionar_endereco(
+        Endereco(
+            apelido="Depósito",
+            logradouro="Rua da Palma",
+            numero="7",
+            bairro="Centro",
+            cidade="São Luís",
+        )
+    )
+    mare.remover_endereco(antigo)
+    repo.salvar_enderecos(mare)
+    repo.fechar()
+
+    recarregado = Repositorio(tmp_path / "teste.db")
+    recarregado.carregar()
+    salva = next(e for e in recarregado.compradoras if "Maré" in e.nome)
+    apelidos = {e.apelido for e in salva.enderecos}
+    assert apelidos == {"Restaurante", "Depósito"}
+    recarregado.fechar()
+
+
+def test_condicoes_de_entrega_da_marisqueira_persistem(repo, tmp_path):
+    maresia = next(e for e in repo.marisqueiras if "Maresia" in e.nome)
+    maresia.configurar_entrega(prazo_preparo_horas=5, raio_entrega_km=Decimal("12.5"))
+    repo.salvar_empresa(maresia)
+    repo.fechar()
+
+    recarregado = Repositorio(tmp_path / "teste.db")
+    recarregado.carregar()
+    salva = next(e for e in recarregado.marisqueiras if "Maresia" in e.nome)
+    assert salva.prazo_preparo_horas == 5
+    assert salva.raio_entrega_km == Decimal("12.5")
+    recarregado.fechar()
+
+
+def test_pedido_guarda_a_copia_do_endereco_mesmo_depois_de_editar(repo, tmp_path):
+    """Mesma garantia de RN07 com o preço, aplicada ao destino da entrega."""
+    mare = next(e for e in repo.compradoras if "Maré" in e.nome)
+    pedido = next(p for p in mare.pedidos if p.endereco is not None)
+    numero_original = pedido.endereco.numero
+    apelido_original = pedido.endereco.apelido
+    texto_original = pedido.endereco_entrega
+
+    cadastrado = next(e for e in mare.enderecos if e.apelido == apelido_original)
+    cadastrado.numero = "999"
+    repo.salvar_enderecos(mare)
+    repo.fechar()
+
+    recarregado = Repositorio(tmp_path / "teste.db")
+    recarregado.carregar()
+    salvo = recarregado.pedidos[pedido.id]
+    assert salvo.endereco.numero == numero_original
+    assert salvo.endereco_entrega == texto_original
+    # E o cadastro, esse sim, mudou.
+    salva = next(e for e in recarregado.compradoras if "Maré" in e.nome)
+    assert (
+        next(e for e in salva.enderecos if e.apelido == apelido_original).numero
+        == "999"
+    )
+    recarregado.fechar()
+
+
+def test_prazo_confirmado_e_previsao_persistem(repo, tmp_path):
+    aguardando = next(
+        p for p in repo.pedidos.values() if p.status is StatusPedido.AGUARDANDO_ANALISE
+    )
+    assert not aguardando.prazo_confirmado
+    aguardando.marisqueira.aceitar_pedido(aguardando, prazo_dias=5)
+    repo.salvar_pedido(aguardando)
+    repo.fechar()
+
+    recarregado = Repositorio(tmp_path / "teste.db")
+    recarregado.carregar()
+    salvo = recarregado.pedidos[aguardando.id]
+    assert salvo.prazo_confirmado
+    assert salvo.tempo_entrega_dias == 5
+    assert salvo.previsao_entrega is not None
+    assert (salvo.previsao_entrega - salvo.criado_em).days == 5
     recarregado.fechar()

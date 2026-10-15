@@ -13,6 +13,7 @@ from PySide6.QtWidgets import (
     QHeaderView,
     QLabel,
     QMessageBox,
+    QScrollArea,
     QTableWidget,
     QTableWidgetItem,
     QVBoxLayout,
@@ -160,6 +161,24 @@ def cartao(margem: int = 20, espacamento: int = 14) -> tuple[QFrame, QVBoxLayout
     layout.setContentsMargins(margem, margem, margem, margem)
     layout.setSpacing(espacamento)
     return moldura, layout
+
+
+def rolavel(conteudo: QWidget) -> QScrollArea:
+    """Põe o conteúdo numa área rolável, sem moldura nem fundo próprio.
+
+    Painel de detalhe cresce conforme o pedido (endereço longo, muitos itens,
+    mapa, botões). Sem rolagem o Qt espreme tudo abaixo do mínimo e os
+    widgets passam a se sobrepor — que é o bug de interface que aparecia no
+    detalhe do pedido em tela baixa.
+    """
+    area = QScrollArea()
+    area.setWidget(conteudo)
+    area.setWidgetResizable(True)
+    area.setFrameShape(QFrame.Shape.NoFrame)
+    area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+    area.setStyleSheet("QScrollArea { background: transparent; border: none; }")
+    area.viewport().setAutoFillBackground(False)
+    return area
 
 
 def metrica(rotulo: str, valor: str) -> QFrame:

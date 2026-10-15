@@ -1,8 +1,12 @@
 """Mapa do trajeto da entrega (extensão além de P10).
 
-Plano das coordenadas reais desenhado com QPainter, sem tiles de servidor,
-então funciona offline. A longitude é corrigida por cos(lat), senão o
-trajeto sai esticado na horizontal.
+Desenha a malha viária de verdade: as ruas vêm do OpenStreetMap, lidas de
+`geo/malha.py`, e a rota é a sequência de pontos que o roteador devolveu,
+não uma reta de A a B. QPainter puro, sem tiles de servidor, então abre
+offline.
+
+A longitude é corrigida por cos(lat) em todo o módulo, senão o mapa sai
+esticado na horizontal.
 """
 
 from __future__ import annotations
@@ -10,20 +14,47 @@ from __future__ import annotations
 import math
 
 from PySide6.QtCore import QPointF, QRectF, Qt
-from PySide6.QtGui import QBrush, QColor, QFont, QPainter, QPainterPath, QPen
+from PySide6.QtGui import (
+    QBrush,
+    QColor,
+    QFont,
+    QPainter,
+    QPainterPath,
+    QPen,
+    QPolygonF,
+)
 from PySide6.QtWidgets import QWidget
 
 from dominio.coordenada import Coordenada
+from dominio.rota import Rota
+from geo.malha import malha
 from ui import estilo
 
+TERRA = QColor("#F2F1EC")
 AGUA = QColor("#DCE9EC")
-AGUA_LINHA = QColor("#C2D6DB")
+RUA = QColor("#FFFFFF")
+RUA_BORDA = QColor("#DAD7CE")
+VIA_PRINCIPAL = QColor("#FBE8C8")
+VIA_PRINCIPAL_BORDA = QColor("#E4C48C")
+ROTA_PREVISTA = QColor("#7F9BA0")
+
+# Vias que ganham cor de via arterial em vez de rua branca.
+ARTERIAIS = ("motorway", "trunk", "primary")
+
+# Fonte dos dados. O ODbL exige o crédito visível onde o dado aparece.
+CREDITO = "© OpenStreetMap contributors (ODbL)"
 
 
 class WidgetMapa(QWidget):
-    """Desenha origem, destino, rota prevista, trajeto andado e o entregador."""
+    """Desenha ruas, rota prevista, trajeto andado e o entregador."""
 
     MARGEM = 34
+    # Texto de quando não há nada pra projetar. A tela de endereços troca
+    # este texto, porque lá o que falta é a coordenada e não a rota.
+    vazio = "Sem rota para mostrar"
+    # Folga mínima em volta da rota, em graus. Sem isso uma entrega curta
+    # fica com zoom tão fechado que não aparece rua nenhuma em volta.
+    FOLGA_MINIMA = 0.004
 
     def __init__(self, pai=None) -> None:
         super().__init__(pai)
@@ -32,8 +63,12 @@ class WidgetMapa(QWidget):
         self.destino: Coordenada | None = None
         self.trajeto: list[Coordenada] = []
         self.posicao: Coordenada | None = None
+        self.rota: Rota | None = None
         self.rotulo_origem = "Origem"
         self.rotulo_destino = "Destino"
+        # Modo de ponto único: mostra um endereço sozinho, sem trajeto.
+        self.ponto: Coordenada | None = None
+        self.rotulo_ponto = ""
 
     def definir_rota(
         self,
@@ -43,23 +78,50 @@ class WidgetMapa(QWidget):
         posicao: Coordenada | None = None,
         rotulo_origem: str = "Origem",
         rotulo_destino: str = "Destino",
+        rota: Rota | None = None,
     ) -> None:
         self.origem = origem
         self.destino = destino
         self.trajeto = list(trajeto or [])
         self.posicao = posicao
+        self.rota = rota
         self.rotulo_origem = rotulo_origem
         self.rotulo_destino = rotulo_destino
+        self.ponto = None
+        self.update()
+
+    def definir_ponto(self, coordenada: Coordenada | None, rotulo: str = "") -> None:
+        """Mostra um endereço sozinho, sem trajeto nenhum.
+
+        Serve ao cadastro de endereços: depois de buscar a coordenada, ver o
+        pino na rua certa vale mais do que ler dois números de latitude.
+        """
+        self.origem = None
+        self.destino = None
+        self.trajeto = []
+        self.posicao = None
+        self.rota = None
+        self.ponto = coordenada
+        self.rotulo_ponto = rotulo
         self.update()
 
     # projeção
 
     def _pontos(self) -> list[Coordenada]:
+        if self.ponto is not None:
+            # Dois pontos iguais: a folga mínima abre a janela em volta dele.
+            return [self.ponto, self.ponto]
         tudo = [p for p in (self.origem, self.destino, self.posicao) if p]
+        if self.rota is not None:
+            tudo += list(self.rota.pontos)
         return tudo + self.trajeto
 
     def _projetor(self):
-        """Devolve a função que converte Coordenada em pixel do widget."""
+        """Devolve (projetar, escala, fator, caixa) ou None se não há rota.
+
+        `caixa` é o retângulo geográfico visível, que é o que a consulta à
+        malha precisa pra não varrer o estado inteiro.
+        """
         pontos = self._pontos()
         if len(pontos) < 2:
             return None
@@ -72,8 +134,8 @@ class WidgetMapa(QWidget):
 
         min_lat, max_lat = min(lats), max(lats)
         min_lon, max_lon = min(lons), max(lons)
-        altura_graus = max(max_lat - min_lat, 1e-4)
-        largura_graus = max((max_lon - min_lon) * fator, 1e-4)
+        altura_graus = max(max_lat - min_lat, self.FOLGA_MINIMA)
+        largura_graus = max((max_lon - min_lon) * fator, self.FOLGA_MINIMA)
 
         # Folga de 18% para os pinos e rótulos não colarem na borda.
         altura_graus *= 1.18
@@ -89,14 +151,27 @@ class WidgetMapa(QWidget):
         )
         # Mesma escala nos dois eixos: o menor fator manda, o resto é folga.
         escala = min(area.width() / largura_graus, area.height() / altura_graus)
+        centro_x = area.center().x()
+        centro_y = area.center().y()
 
-        def projetar(c: Coordenada) -> QPointF:
-            dx = (c.longitude - centro_lon) * fator * escala
+        def projetar(c) -> QPointF:
+            # Aceita Coordenada e par (lat, lon), que é como a malha guarda.
+            lat, lon = (c.latitude, c.longitude) if hasattr(c, "latitude") else c
+            dx = (lon - centro_lon) * fator * escala
             # Latitude cresce para o norte, y da tela cresce para baixo.
-            dy = -(c.latitude - centro_lat) * escala
-            return QPointF(area.center().x() + dx, area.center().y() + dy)
+            dy = -(lat - centro_lat) * escala
+            return QPointF(centro_x + dx, centro_y + dy)
 
-        return projetar, escala, fator
+        # Retângulo geográfico que a tela inteira cobre, incluindo as margens.
+        meia_altura = (self.height() / 2) / escala
+        meia_largura = (self.width() / 2) / escala / fator
+        caixa = (
+            centro_lat - meia_altura,
+            centro_lon - meia_largura,
+            centro_lat + meia_altura,
+            centro_lon + meia_largura,
+        )
+        return projetar, escala, fator, caixa
 
     # pintura
 
@@ -105,29 +180,69 @@ class WidgetMapa(QWidget):
         pintor.setRenderHint(QPainter.RenderHint.Antialiasing)
 
         area = QRectF(0, 0, self.width(), self.height())
-        caminho = QPainterPath()
-        caminho.addRoundedRect(area.adjusted(0.5, 0.5, -0.5, -0.5), 10, 10)
-        pintor.fillPath(caminho, QBrush(AGUA))
+        moldura = QPainterPath()
+        moldura.addRoundedRect(area.adjusted(0.5, 0.5, -0.5, -0.5), 10, 10)
+        pintor.fillPath(moldura, QBrush(TERRA))
         pintor.setPen(QPen(QColor(estilo.BORDA), 1))
-        pintor.drawPath(caminho)
-        pintor.setClipPath(caminho)
+        pintor.drawPath(moldura)
+        pintor.setClipPath(moldura)
 
         projecao = self._projetor()
         if projecao is None:
             pintor.setPen(QPen(QColor(estilo.TEXTO_FRACO)))
-            pintor.drawText(area, Qt.AlignmentFlag.AlignCenter, "Sem rota para mostrar")
+            pintor.drawText(area, Qt.AlignmentFlag.AlignCenter, self.vazio)
             return
-        projetar, escala, fator = projecao
+        projetar, escala, fator, caixa = projecao
 
-        self._grade(pintor, area)
+        km_visiveis = self.width() / (escala * fator) * 111.32
+        desenhou_ruas = self._ruas(pintor, projetar, caixa, km_visiveis)
+        if not desenhou_ruas:
+            self._grade(pintor, area)
         self._rota_prevista(pintor, projetar)
         self._trajeto_andado(pintor, projetar)
         self._pinos(pintor, projetar)
         self._entregador(pintor, projetar)
         self._escala(pintor, area, escala, fator)
+        if desenhou_ruas:
+            self._credito(pintor, area)
+
+    def _ruas(self, pintor: QPainter, projetar, caixa, km_visiveis: float) -> bool:
+        """Desenha a malha viária. Falso quando não há arquivo de vias."""
+        rede = malha()
+        if rede is None:
+            return False
+        sul, oeste, norte, leste = caixa
+        vias = rede.vias_em(sul, oeste, norte, leste, km_visiveis)
+        if not vias:
+            return False
+
+        # Duas passadas por via: traço escuro mais grosso embaixo faz a
+        # borda, traço claro em cima faz o asfalto. É o que dá a aparência
+        # de rua em vez de rabisco colorido.
+        for camada in ("borda", "asfalto"):
+            for via in vias:
+                arterial = via.classe in ARTERIAIS
+                if camada == "borda":
+                    cor = VIA_PRINCIPAL_BORDA if arterial else RUA_BORDA
+                    largura = via.espessura + 1.6
+                else:
+                    cor = VIA_PRINCIPAL if arterial else RUA
+                    largura = via.espessura
+                pintor.setPen(
+                    QPen(
+                        cor,
+                        largura,
+                        Qt.PenStyle.SolidLine,
+                        Qt.PenCapStyle.RoundCap,
+                        Qt.PenJoinStyle.RoundJoin,
+                    )
+                )
+                pintor.drawPolyline(QPolygonF([projetar(p) for p in via.pontos]))
+        return True
 
     def _grade(self, pintor: QPainter, area: QRectF) -> None:
-        pintor.setPen(QPen(AGUA_LINHA, 1, Qt.PenStyle.DotLine))
+        """Grade de fundo, só quando a malha viária não está disponível."""
+        pintor.setPen(QPen(AGUA, 1, Qt.PenStyle.DotLine))
         passo = 42
         x = area.left() + passo
         while x < area.right():
@@ -139,37 +254,55 @@ class WidgetMapa(QWidget):
             y += passo
 
     def _rota_prevista(self, pintor: QPainter, projetar) -> None:
-        if not (self.origem and self.destino):
-            return
-        pintor.setPen(
-            QPen(QColor("#9FB8BD"), 2, Qt.PenStyle.DashLine, Qt.PenCapStyle.RoundCap)
-        )
-        pintor.drawLine(projetar(self.origem), projetar(self.destino))
-
-    def _trajeto_andado(self, pintor: QPainter, projetar) -> None:
-        pontos = list(self.trajeto)
-        if self.posicao and (not pontos or pontos[-1] != self.posicao):
-            pontos.append(self.posicao)
-        if len(pontos) < 2:
+        """Caminho planejado, tracejado: a rota inteira quando ela existe."""
+        if self.rota is not None:
+            pontos = [projetar(p) for p in self.rota.pontos]
+        elif self.origem and self.destino:
+            pontos = [projetar(self.origem), projetar(self.destino)]
+        else:
             return
         pintor.setPen(
             QPen(
-                QColor(estilo.PRIMARIA),
+                ROTA_PREVISTA,
                 3,
+                Qt.PenStyle.DashLine,
+                Qt.PenCapStyle.RoundCap,
+                Qt.PenJoinStyle.RoundJoin,
+            )
+        )
+        pintor.drawPolyline(QPolygonF(pontos))
+
+    def _trajeto_andado(self, pintor: QPainter, projetar) -> None:
+        """Parte já percorrida, sólida e por cima da prevista.
+
+        Com rota, o traçado andado é o recorte dela até a posição atual, e
+        não a ligação entre os pontos gravados: unir checkpoint a checkpoint
+        em linha reta cortaria as esquinas.
+        """
+        if self.rota is not None and self.posicao is not None:
+            pontos = list(self.rota.trecho_ate(self.rota.fracao_de(self.posicao)))
+        else:
+            pontos = list(self.trajeto)
+            if self.posicao and (not pontos or pontos[-1] != self.posicao):
+                pontos.append(self.posicao)
+        if len(pontos) < 2:
+            return
+
+        pintor.setPen(
+            QPen(
+                QColor(estilo.PRIMARIA),
+                4,
                 Qt.PenStyle.SolidLine,
                 Qt.PenCapStyle.RoundCap,
                 Qt.PenJoinStyle.RoundJoin,
             )
         )
-        caminho = QPainterPath(projetar(pontos[0]))
-        for ponto in pontos[1:]:
-            caminho.lineTo(projetar(ponto))
-        pintor.drawPath(caminho)
+        pintor.drawPolyline(QPolygonF([projetar(p) for p in pontos]))
 
-        # Marcas discretas em cada posição registrada.
+        # Marcas nas posições que ficaram registradas no histórico.
         pintor.setBrush(QBrush(QColor(estilo.PRIMARIA)))
         pintor.setPen(QPen(QColor("#FFFFFF"), 1))
-        for ponto in pontos[:-1]:
+        for ponto in self.trajeto:
             pintor.drawEllipse(projetar(ponto), 3.0, 3.0)
 
     def _pino(
@@ -199,6 +332,15 @@ class WidgetMapa(QWidget):
         pintor.drawText(caixa, Qt.AlignmentFlag.AlignCenter, rotulo)
 
     def _pinos(self, pintor: QPainter, projetar) -> None:
+        if self.ponto is not None:
+            self._pino(
+                pintor,
+                projetar(self.ponto),
+                estilo.VERMELHO,
+                self.rotulo_ponto,
+                False,
+            )
+            return
         if self.origem:
             self._pino(
                 pintor, projetar(self.origem), estilo.PRIMARIA, self.rotulo_origem, True
@@ -211,6 +353,28 @@ class WidgetMapa(QWidget):
                 self.rotulo_destino,
                 False,
             )
+
+    def _direcao(self, projetar) -> float | None:
+        """Ângulo pra onde o entregador está indo, em graus de tela.
+
+        Tira a direção do próximo ponto da rota, pra a seta apontar na curva
+        em vez de ficar sempre virada pro destino final.
+        """
+        if self.rota is None or self.posicao is None:
+            if self.posicao is None or self.destino is None:
+                return None
+            atual, adiante = self.posicao, self.destino
+        else:
+            fracao = self.rota.fracao_de(self.posicao)
+            atual = self.posicao
+            adiante = self.rota.ponto_em(min(1.0, fracao + 0.01))
+            if adiante == atual:
+                adiante = self.rota.destino
+        inicio, fim = projetar(atual), projetar(adiante)
+        dx, dy = fim.x() - inicio.x(), fim.y() - inicio.y()
+        if abs(dx) < 1e-9 and abs(dy) < 1e-9:
+            return None
+        return math.degrees(math.atan2(dy, dx))
 
     def _entregador(self, pintor: QPainter, projetar) -> None:
         if not self.posicao:
@@ -225,15 +389,17 @@ class WidgetMapa(QWidget):
         pintor.setPen(QPen(QColor("#FFFFFF"), 2))
         pintor.drawEllipse(centro, 9.0, 9.0)
 
-        fonte = QFont(pintor.font())
-        fonte.setPointSize(9)
-        pintor.setFont(fonte)
-        pintor.setPen(QPen(QColor("#FFFFFF")))
-        pintor.drawText(
-            QRectF(centro.x() - 10, centro.y() - 10, 20, 20),
-            Qt.AlignmentFlag.AlignCenter,
-            "▸",
-        )
+        # Seta girada na direção do movimento.
+        angulo = self._direcao(projetar)
+        pintor.setPen(Qt.PenStyle.NoPen)
+        pintor.setBrush(QBrush(QColor("#FFFFFF")))
+        pintor.save()
+        pintor.translate(centro)
+        if angulo is not None:
+            pintor.rotate(angulo)
+        seta = [QPointF(5.5, 0.0), QPointF(-3.5, -4.0), QPointF(-3.5, 4.0)]
+        pintor.drawPolygon(QPolygonF(seta))
+        pintor.restore()
 
     def _escala(
         self, pintor: QPainter, area: QRectF, escala: float, fator: float
@@ -264,4 +430,17 @@ class WidgetMapa(QWidget):
             QRectF(inicio, base_y - 22, comprimento, 16),
             Qt.AlignmentFlag.AlignCenter,
             f"{km} km",
+        )
+
+    def _credito(self, pintor: QPainter, area: QRectF) -> None:
+        """Crédito do OpenStreetMap. A licença ODbL obriga a citar a fonte."""
+        fonte = QFont(pintor.font())
+        fonte.setPointSize(7)
+        pintor.setFont(fonte)
+        pintor.setPen(QPen(QColor(estilo.TEXTO_FRACO)))
+        caixa = QRectF(area.left(), area.bottom() - 15, area.width() - 10, 12)
+        pintor.drawText(
+            caixa,
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
+            CREDITO,
         )

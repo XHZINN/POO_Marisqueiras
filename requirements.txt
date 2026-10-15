@@ -1,5 +1,10 @@
-# Execução do sistema
+# Execução do sistema. O pacote completo do PySide6 é necessário: o mapa
+# navegável (ui/mapa_web.py) roda sobre o QtWebEngine, que não entra no
+# PySide6-Essentials.
 PySide6>=6.11
+# Distância geodésica (dominio/coordenada.py) e geocodificação pelo
+# Nominatim (geo/geocodificacao.py). O roteamento pelo OSRM e o download da
+# malha usam urllib da biblioteca padrão, então não entram aqui.
 geopy>=2.4
 
 # Desenvolvimento (testes e formatação)

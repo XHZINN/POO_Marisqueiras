@@ -9,7 +9,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from decimal import Decimal
 
-from PySide6.QtCore import QTimer
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import (
     QComboBox,
     QDialog,
@@ -25,7 +25,6 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QProgressBar,
     QPushButton,
-    QSpinBox,
     QTabWidget,
     QTextEdit,
     QVBoxLayout,
@@ -43,6 +42,8 @@ from dominio.enums import (
 )
 from dominio.pedido import Pedido
 from dominio.produto import Produto
+from dominio.rota import Rota
+from geo.roteador import roteador
 from repositorio.repositorio import Repositorio
 from ui.componentes import (
     cartao,
@@ -59,11 +60,13 @@ from ui.componentes import (
     pilula_status,
     protegido,
     reais,
+    rolavel,
     rotulo_secao,
     tabela,
 )
-from ui.estilo import LARANJA, PRIMARIA, TEXTO_SUAVE, VERDE
-from ui.mapa import WidgetMapa
+from ui.dialogo_enderecos import DialogoEnderecos
+from ui.estilo import LARANJA, PRIMARIA, TEXTO_SUAVE, VERDE, VERMELHO
+from ui.mapa_web import MapaWeb
 from ui.painel_notificacoes import PainelNotificacoes
 
 TODAS = "Todas"
@@ -331,6 +334,8 @@ class PainelCompradora(QWidget):
         self._pedidos_na_tabela: list[Pedido] = []
         # Carrinho: pares (produto, quantidade_kg) até virar um Pedido.
         self._carrinho: list[tuple[Produto, Decimal]] = []
+        # Rota usada na previsão, reaproveitada no envio do pedido.
+        self._rota_previa: Rota | None = None
         # Extensão além de P10: relê o trajeto a cada 2s durante o trânsito.
         self.timer_rastreio = QTimer(self)
         self.timer_rastreio.setInterval(2000)
@@ -483,17 +488,50 @@ class PainelCompradora(QWidget):
 
         formulario = QFormLayout()
         formulario.setSpacing(12)
-        self.in_endereco = QLineEdit(self.empresa.endereco)
-        self.in_prazo = QSpinBox()
-        self.in_prazo.setRange(1, 60)
-        self.in_prazo.setValue(3)
-        self.in_prazo.setSuffix(" dia(s)")
+
+        # O endereço é escolhido do cadastro, não digitado a cada compra.
+        linha_endereco = QHBoxLayout()
+        linha_endereco.setSpacing(8)
+        self.in_endereco = QComboBox()
+        self.in_endereco.currentIndexChanged.connect(self._atualizar_previsao)
+        botao_enderecos = QPushButton("Gerenciar")
+        botao_enderecos.setObjectName("secundario")
+        botao_enderecos.setFixedWidth(96)
+        botao_enderecos.clicked.connect(self._abrir_enderecos)
+        linha_endereco.addWidget(self.in_endereco, 1)
+        linha_endereco.addWidget(botao_enderecos)
+
         self.in_pagamento = QComboBox()
         for forma in FormaPagamento:
             self.in_pagamento.addItem(forma.rotulo, forma)
-        formulario.addRow("Endereço de entrega", self.in_endereco)
-        formulario.addRow("Tempo de entrega", self.in_prazo)
+
+        # O endereço escolhido fica por extenso embaixo do combo: o rótulo
+        # da lista é curto pra caber, e esconder metade do destino da entrega
+        # é justamente o tipo de coisa que faz a carga ir pro lugar errado.
+        self.lbl_endereco_detalhe = QLabel()
+        self.lbl_endereco_detalhe.setObjectName("meta")
+        self.lbl_endereco_detalhe.setWordWrap(True)
+        coluna_endereco = QVBoxLayout()
+        coluna_endereco.setSpacing(4)
+        coluna_endereco.addLayout(linha_endereco)
+        coluna_endereco.addWidget(self.lbl_endereco_detalhe)
+
+        # Prazo é estimativa do sistema e compromisso de quem entrega, então
+        # aparece como informação e não como campo pra preencher.
+        self.lbl_previsao = QLabel("Escolha os produtos para ver a previsão.")
+        self.lbl_previsao.setObjectName("meta")
+        self.lbl_previsao.setWordWrap(True)
+        self.lbl_previsao_detalhe = QLabel()
+        self.lbl_previsao_detalhe.setObjectName("meta")
+        self.lbl_previsao_detalhe.setWordWrap(True)
+        coluna_previsao = QVBoxLayout()
+        coluna_previsao.setSpacing(4)
+        coluna_previsao.addWidget(self.lbl_previsao)
+        coluna_previsao.addWidget(self.lbl_previsao_detalhe)
+
+        formulario.addRow("Endereço de entrega", coluna_endereco)
         formulario.addRow("Pagamento", self.in_pagamento)
+        formulario.addRow("Previsão de entrega", coluna_previsao)
         layout.addLayout(formulario)
 
         layout.addWidget(rotulo_secao("Total"))
@@ -573,8 +611,7 @@ class PainelCompradora(QWidget):
         # na hora da escolha e não no fim.
         candidato = Pedido(
             compradora=self.empresa,
-            endereco_entrega=self.in_endereco.text() or self.empresa.endereco,
-            tempo_entrega_dias=self.in_prazo.value(),
+            endereco_entrega=self._endereco_escolhido() or self.empresa.endereco,
         )
 
         def acao() -> None:
@@ -622,6 +659,9 @@ class PainelCompradora(QWidget):
             self.lbl_vendedora.setText(f"Vendedora: {empresa.nome}")
             self.lbl_vendedora.setStyleSheet(f"color: {PRIMARIA}; font-weight: 600;")
 
+        # A previsão depende de quem vende e de para onde vai.
+        self._atualizar_previsao()
+
     def _comparar(self) -> None:
         """P26: comparação entre produtos, inclusive de empresas diferentes."""
         selecionados = self._produtos_selecionados()
@@ -634,14 +674,18 @@ class PainelCompradora(QWidget):
             DialogoComparacao(self, comparacao).exec()
 
     def _realizar_pedido(self) -> None:
-        """RN13, RN14, RN15 e RN18: monta, valida e envia o pedido."""
+        """RN13, RN14, RN15 e RN18: monta, valida e envia o pedido.
+
+        Sem prazo digitado: o pedido sai com a estimativa calculada e quem
+        fecha o prazo é a marisqueira, no aceite.
+        """
 
         def acao() -> None:
             pedido = self.empresa.realizar_pedido(
                 itens=list(self._carrinho),
-                endereco_entrega=self.in_endereco.text(),
-                tempo_entrega_dias=self.in_prazo.value(),
+                endereco_entrega=self._endereco_escolhido(),
                 forma_pagamento=self.in_pagamento.currentData(),
+                rota=self._rota_previa,
             )
             self.repo.salvar_pedido(pedido)
 
@@ -651,6 +695,117 @@ class PainelCompradora(QWidget):
             self._carrinho.clear()
             self._atualizar_carrinho()
             self.ao_alterar()
+
+    # Endereços salvos e previsão
+
+    def _endereco_escolhido(self):
+        """Endereço selecionado no combo, ou None se não houver cadastro."""
+        return self.in_endereco.currentData()
+
+    def _recarregar_enderecos(self) -> None:
+        """Repovoa o combo, mantendo quem estava escolhido quando dá."""
+        escolhido = self._endereco_escolhido()
+        self.in_endereco.blockSignals(True)
+        self.in_endereco.clear()
+        for endereco in self.empresa.enderecos:
+            marca = " · principal" if endereco.principal else ""
+            rotulo = f"{endereco.apelido}{marca} — {endereco.logradouro}"
+            self.in_endereco.addItem(rotulo, endereco)
+            self.in_endereco.setItemData(
+                self.in_endereco.count() - 1,
+                endereco.linha,
+                Qt.ItemDataRole.ToolTipRole,
+            )
+        if not self.empresa.enderecos:
+            self.in_endereco.addItem(
+                f"Sem endereço cadastrado — usa {self.empresa.endereco}", None
+            )
+        indice = self.in_endereco.findData(escolhido)
+        if indice < 0:
+            principal = self.empresa.endereco_principal
+            indice = max(0, self.in_endereco.findData(principal))
+        self.in_endereco.setCurrentIndex(indice)
+        self.in_endereco.blockSignals(False)
+        self._mostrar_endereco_escolhido()
+        self._atualizar_previsao()
+
+    def _mostrar_endereco_escolhido(self) -> None:
+        escolhido = self._endereco_escolhido()
+        if escolhido is None:
+            self.lbl_endereco_detalhe.setText(
+                f"Sem endereço cadastrado. A entrega vai para {self.empresa.endereco}."
+            )
+            return
+        texto = escolhido.linha
+        if escolhido.referencia:
+            texto += f"\nReferência: {escolhido.referencia}"
+        self.lbl_endereco_detalhe.setText(texto)
+
+    def _abrir_enderecos(self) -> None:
+        DialogoEnderecos(self, self.empresa, self.repo).exec()
+        self._recarregar_enderecos()
+
+    def _atualizar_previsao(self) -> None:
+        """Mostra quando a carga chega, segundo preparo e rota.
+
+        Monta um pedido de rascunho e deixa o domínio fazer a conta, que é a
+        mesma usada no pedido de verdade. A rota calculada aqui é reaproveitada
+        no envio, pra não consultar o roteador duas vezes.
+        """
+        self._rota_previa = None
+        self.lbl_previsao_detalhe.setText("")
+        if not self._carrinho:
+            self.lbl_previsao.setText("Escolha os produtos para ver a previsão.")
+            self.lbl_previsao.setStyleSheet(f"color: {TEXTO_SUAVE};")
+            return
+
+        marisqueira = self._carrinho[0][0].empresa
+        destino = self._endereco_escolhido() or self.empresa.endereco
+        rascunho = Pedido(compradora=self.empresa, endereco_entrega=destino)
+        rascunho.marisqueira = marisqueira
+        self._rota_previa = roteador().rota(
+            rascunho.coordenada_origem, rascunho.coordenada_entrega
+        )
+        rascunho.definir_rota(self._rota_previa)
+
+        # Fora de área é recusa certa no envio: melhor dizer agora do que
+        # deixar a pessoa montar o pedido inteiro pra levar erro no fim.
+        if not marisqueira.atende(rascunho.coordenada_entrega):
+            self.lbl_previsao.setText(
+                f"{marisqueira.nome} entrega em até {marisqueira.raio_entrega_km} km."
+            )
+            self.lbl_previsao.setStyleSheet(f"color: {VERMELHO}; font-weight: 600;")
+            self.lbl_previsao_detalhe.setText(
+                "Este endereço está fora da área. Escolha outro endereço ou "
+                "outra empresa."
+            )
+            return
+
+        previsao = rascunho.previsao_estimada
+        if previsao is None:
+            self.lbl_previsao.setText(f"Cerca de {rascunho.prazo_estimado_dias} dia(s)")
+            self.lbl_previsao.setStyleSheet(f"color: {TEXTO_SUAVE};")
+            self.lbl_previsao_detalhe.setText(
+                "Sem coordenada do destino não dá pra estimar o trajeto."
+            )
+            return
+
+        self.lbl_previsao.setText(
+            f"{previsao:%d/%m às %H:%M} · cerca de "
+            f"{rascunho.prazo_estimado_dias} dia(s)"
+        )
+        self.lbl_previsao.setStyleSheet(f"color: {PRIMARIA}; font-weight: 600;")
+
+        conta = [f"{marisqueira.prazo_preparo_horas} h de preparo"]
+        if self._rota_previa is not None:
+            modo = "por ruas" if self._rota_previa.por_ruas else "em linha reta"
+            conta.append(
+                f"{self._rota_previa.duracao_minutos} min de trajeto "
+                f"({self._rota_previa.distancia_km} km {modo})"
+            )
+        self.lbl_previsao_detalhe.setText(
+            " + ".join(conta) + "\nA marisqueira confirma o prazo ao aceitar."
+        )
 
     # Aba 2: meus pedidos e avaliação
 
@@ -680,7 +835,7 @@ class PainelCompradora(QWidget):
         )
         self.tbl_meus_pedidos.itemSelectionChanged.connect(self._meu_pedido_mudou)
         colunas.addWidget(self.tbl_meus_pedidos, 3)
-        colunas.addWidget(self._detalhe_pedido(), 2)
+        colunas.addWidget(rolavel(self._detalhe_pedido()), 2)
         layout.addLayout(colunas)
         return pagina
 
@@ -704,7 +859,7 @@ class PainelCompradora(QWidget):
 
         # Extensão além de P10: mapa do trajeto, com atualização por timer.
         layout.addWidget(rotulo_secao("Entrega"))
-        self.mapa = WidgetMapa()
+        self.mapa = MapaWeb()
         self.mapa.setMinimumHeight(190)
         layout.addWidget(self.mapa)
         self.barra_entrega = QProgressBar()
@@ -910,8 +1065,8 @@ class PainelCompradora(QWidget):
         self.lbl_pedido_info.setText(
             f"{pedido.marisqueira.nome if pedido.marisqueira else ''}\n"
             f"{pedido.endereco_entrega}\n"
-            f"Prazo de {pedido.tempo_entrega_dias} dia(s) · "
-            f"entrega {pedido.status_entrega.rotulo.lower()}\n"
+            f"{pedido.resumo_prazo}\n"
+            f"Entrega: {pedido.status_entrega.rotulo}\n"
             f"{pedido.forma_pagamento.rotulo} · "
             f"pagamento {pedido.status_pagamento.rotulo.lower()}"
         )
@@ -957,6 +1112,19 @@ class PainelCompradora(QWidget):
         self.btn_origem.setEnabled(any(i.origem for i in pedido.itens))
         self._atualizar_mapa(pedido)
 
+    def _rota_do_pedido(self, pedido: Pedido) -> Rota | None:
+        """Rota por ruas do pedido, resolvida na primeira vez que a tela pede.
+
+        A rota não é gravada no banco: ela é derivada das duas coordenadas e
+        vem do cache de `dados/rotas.json`. Guardar no pedido evita refazer a
+        conta a cada atualização do rastreio.
+        """
+        if pedido.rota is None:
+            pedido.definir_rota(
+                roteador().rota(pedido.coordenada_origem, pedido.coordenada_entrega)
+            )
+        return pedido.rota
+
     def _atualizar_mapa(self, pedido: Pedido) -> None:
         """Pinta o trajeto do pedido e liga ou desliga o acompanhamento."""
         self.mapa.definir_rota(
@@ -966,6 +1134,7 @@ class PainelCompradora(QWidget):
             posicao=pedido.posicao_atual,
             rotulo_origem=(pedido.marisqueira.nome if pedido.marisqueira else "Origem"),
             rotulo_destino=self.empresa.nome,
+            rota=self._rota_do_pedido(pedido),
         )
         self.barra_entrega.setValue(pedido.progresso_percentual)
 
@@ -999,6 +1168,7 @@ class PainelCompradora(QWidget):
 
     def atualizar(self) -> None:
         self._recarregar_filtros()
+        self._recarregar_enderecos()
         self._buscar()
         self._atualizar_meus_pedidos()
         self._atualizar_carrinho()

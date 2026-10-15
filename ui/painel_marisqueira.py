@@ -10,9 +10,12 @@ from __future__ import annotations
 from collections.abc import Callable
 from decimal import Decimal
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QDate, Qt
 from PySide6.QtWidgets import (
     QComboBox,
+    QDateEdit,
+    QDialog,
+    QDialogButtonBox,
     QDoubleSpinBox,
     QFormLayout,
     QGroupBox,
@@ -28,7 +31,13 @@ from PySide6.QtWidgets import (
 )
 
 from dominio.empresa import EmpresaMarisqueira
-from dominio.enums import Categoria, StatusEntrega, StatusPedido
+from dominio.enums import (
+    Categoria,
+    MetodoColeta,
+    StatusEntrega,
+    StatusPagamento,
+    StatusPedido,
+)
 from dominio.pedido import Pedido
 from dominio.produto import Produto
 from repositorio.repositorio import Repositorio
@@ -49,7 +58,82 @@ from ui.componentes import (
     rotulo_secao,
     tabela,
 )
+from ui.dialogo_simulacao import DialogoSimulacao
 from ui.painel_notificacoes import PainelNotificacoes
+
+
+class DialogoOrigem(QDialog):
+    """Ficha do lote em venda. Extensão além de P2."""
+
+    def __init__(self, pai, produto) -> None:
+        super().__init__(pai)
+        self.setWindowTitle("Ficha de origem")
+        self.setMinimumWidth(460)
+        ficha = produto.rastreabilidade
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(26, 24, 26, 20)
+        layout.setSpacing(14)
+        titulo = QLabel(produto.nome_exibicao)
+        titulo.setObjectName("nomeEmpresa")
+        layout.addWidget(titulo)
+
+        formulario = QFormLayout()
+        formulario.setSpacing(12)
+        self.in_lote = QLineEdit(ficha.lote if ficha else "")
+        self.in_lote.setPlaceholderText("SUR-2410-A")
+        self.in_data = QDateEdit()
+        self.in_data.setCalendarPopup(True)
+        self.in_data.setMaximumDate(QDate.currentDate())
+        self.in_data.setDate(
+            QDate(
+                ficha.data_coleta.year, ficha.data_coleta.month, ficha.data_coleta.day
+            )
+            if ficha
+            else QDate.currentDate()
+        )
+        self.in_local = QLineEdit(ficha.local_coleta if ficha else "")
+        self.in_local.setPlaceholderText("Baixio da Raposa")
+        self.in_responsavel = QLineEdit(ficha.responsavel if ficha else "")
+        self.in_responsavel.setPlaceholderText("Quem coletou")
+        self.in_metodo = QComboBox()
+        for metodo in MetodoColeta:
+            self.in_metodo.addItem(metodo.rotulo, metodo)
+        if ficha:
+            self.in_metodo.setCurrentIndex(self.in_metodo.findData(ficha.metodo))
+        self.in_observacoes = QLineEdit(ficha.observacoes or "" if ficha else "")
+        self.in_observacoes.setPlaceholderText("Opcional")
+
+        formulario.addRow("Lote", self.in_lote)
+        formulario.addRow("Data da coleta", self.in_data)
+        formulario.addRow("Local", self.in_local)
+        formulario.addRow("Responsável", self.in_responsavel)
+        formulario.addRow("Método", self.in_metodo)
+        formulario.addRow("Observações", self.in_observacoes)
+        layout.addLayout(formulario)
+
+        botoes = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        botoes.button(QDialogButtonBox.StandardButton.Ok).setText("Salvar")
+        botoes.button(QDialogButtonBox.StandardButton.Cancel).setText("Cancelar")
+        botoes.button(QDialogButtonBox.StandardButton.Cancel).setObjectName(
+            "secundario"
+        )
+        botoes.accepted.connect(self.accept)
+        botoes.rejected.connect(self.reject)
+        layout.addWidget(botoes)
+
+    @property
+    def dados(self) -> dict:
+        return {
+            "lote": self.in_lote.text(),
+            "data_coleta": self.in_data.date().toPython(),
+            "local_coleta": self.in_local.text(),
+            "responsavel": self.in_responsavel.text(),
+            "metodo": self.in_metodo.currentData(),
+            "observacoes": self.in_observacoes.text(),
+        }
 
 
 class PainelMarisqueira(QWidget):
@@ -97,7 +181,7 @@ class PainelMarisqueira(QWidget):
         esquerda = QVBoxLayout()
         esquerda.setSpacing(12)
         self.tbl_produtos = tabela(
-            ["Produto", "Categoria", "Preço por kg", "Estoque", "Situação"]
+            ["Produto", "Categoria", "Preço por kg", "Estoque", "Situação", "Lote"]
         )
         self.tbl_produtos.itemSelectionChanged.connect(self._produto_selecionado_mudou)
         esquerda.addWidget(self.tbl_produtos)
@@ -110,8 +194,12 @@ class PainelMarisqueira(QWidget):
         self.btn_preco = QPushButton("Alterar preço")
         self.btn_preco.setObjectName("secundario")
         self.btn_preco.clicked.connect(self._alterar_preco)
+        self.btn_origem = QPushButton("Ficha de origem")
+        self.btn_origem.setObjectName("secundario")
+        self.btn_origem.clicked.connect(self._editar_origem)
         acoes.addWidget(self.btn_quantidade)
         acoes.addWidget(self.btn_preco)
+        acoes.addWidget(self.btn_origem)
         acoes.addStretch()
         esquerda.addLayout(acoes)
 
@@ -312,7 +400,55 @@ class PainelMarisqueira(QWidget):
         segunda.addWidget(self.btn_ajuste)
         segunda.addWidget(self.btn_entrega)
         layout.addLayout(segunda)
+
+        terceira = QHBoxLayout()
+        terceira.setSpacing(10)
+        self.btn_pagamento = QPushButton("Confirmar pagamento")
+        self.btn_pagamento.setObjectName("secundario")
+        self.btn_pagamento.clicked.connect(self._confirmar_pagamento)
+        self.btn_simular = QPushButton("Acompanhar entrega")
+        self.btn_simular.clicked.connect(self._simular_entrega)
+        terceira.addWidget(self.btn_pagamento)
+        terceira.addWidget(self.btn_simular)
+        layout.addLayout(terceira)
         return moldura
+
+    def _confirmar_pagamento(self) -> None:
+        """Extensão além de P27: a marisqueira atesta que o dinheiro entrou."""
+        pedido = self._pedido_selecionado()
+        if pedido is None:
+            return
+
+        def acao() -> None:
+            self.empresa.confirmar_pagamento(pedido)
+            self.repo.salvar_pedido(pedido)
+
+        if protegido(self, acao, "Pagamento confirmado."):
+            self.ao_alterar()
+
+    def _simular_entrega(self) -> None:
+        """Extensão além de P10: mapa com o entregador indo de A até B."""
+        pedido = self._pedido_selecionado()
+        if pedido is None:
+            return
+        DialogoSimulacao(self, pedido, self.empresa, self.repo, self.ao_alterar).exec()
+        self.ao_alterar()
+
+    def _editar_origem(self) -> None:
+        """Extensão além de P2: ficha do lote em venda."""
+        produto = self._produto_selecionado()
+        if produto is None:
+            return
+        dialogo = DialogoOrigem(self, produto)
+        if dialogo.exec() != QDialog.DialogCode.Accepted:
+            return
+
+        def acao() -> None:
+            self.empresa.registrar_rastreabilidade(produto=produto, **dialogo.dados)
+            self.repo.salvar_produto(produto)
+
+        if protegido(self, acao, "Ficha de origem registrada."):
+            self.ao_alterar()
 
     def _aceitar_pedido(self) -> None:
         pedido = self._pedido_selecionado()
@@ -466,6 +602,14 @@ class PainelMarisqueira(QWidget):
                 linha, 3, celula_numero(kg(produto.quantidade_disponivel_kg))
             )
             self.tbl_produtos.setItem(linha, 4, celula_situacao(produto.situacao))
+            ficha = produto.rastreabilidade
+            self.tbl_produtos.setItem(
+                linha,
+                5,
+                celula(ficha.lote, negrito=True)
+                if ficha
+                else celula_suave("sem ficha"),
+            )
 
     def _atualizar_pedidos(self) -> None:
         self._pedidos_na_tabela = sorted(
@@ -533,6 +677,7 @@ class PainelMarisqueira(QWidget):
         tem = self._produto_selecionado() is not None
         self.btn_quantidade.setEnabled(tem)
         self.btn_preco.setEnabled(tem)
+        self.btn_origem.setEnabled(tem)
 
     def _pedido_selecionado_mudou(self) -> None:
         pedido = self._pedido_selecionado()
@@ -549,6 +694,8 @@ class PainelMarisqueira(QWidget):
                 self.btn_rejeitar,
                 self.btn_ajuste,
                 self.btn_entrega,
+                self.btn_pagamento,
+                self.btn_simular,
             ):
                 botao.setEnabled(False)
             return
@@ -559,7 +706,15 @@ class PainelMarisqueira(QWidget):
             f"{pedido.compradora.nome}\n"
             f"{pedido.endereco_entrega}\n"
             f"Prazo de {pedido.tempo_entrega_dias} dia(s) · "
-            f"entrega {pedido.status_entrega.rotulo.lower()}"
+            f"entrega {pedido.status_entrega.rotulo.lower()}\n"
+            f"{pedido.forma_pagamento.rotulo} · "
+            f"pagamento {pedido.status_pagamento.rotulo.lower()}"
+            + (
+                f"\nTrajeto: faltam {pedido.distancia_restante_km} km "
+                f"de {pedido.distancia_total_km} km"
+                if pedido.em_transito and pedido.distancia_total_km
+                else ""
+            )
         )
         for item in pedido.itens:
             self.lst_itens_pedido.addItem(
@@ -590,3 +745,9 @@ class PainelMarisqueira(QWidget):
             pedido.status in (StatusPedido.ACEITO, StatusPedido.EM_PREPARACAO)
             and pedido.status_entrega is not StatusEntrega.SAIU_PARA_ENTREGA
         )
+        self.btn_pagamento.setEnabled(
+            pedido.status_pagamento
+            in (StatusPagamento.PENDENTE, StatusPagamento.INFORMADO)
+            and pedido.status is not StatusPedido.CANCELADO
+        )
+        self.btn_simular.setEnabled(pedido.em_transito)

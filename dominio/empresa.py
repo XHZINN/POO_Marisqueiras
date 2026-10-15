@@ -16,8 +16,12 @@ from datetime import datetime, time
 from decimal import Decimal
 
 from dominio.avaliacao import Avaliacao
+from dominio.coordenada import Coordenada
+from dominio.entrega import EventoEntrega
 from dominio.enums import (
     Categoria,
+    FormaPagamento,
+    MetodoColeta,
     OrdenacaoBusca,
     SituacaoEmpresa,
     StatusEntrega,
@@ -35,6 +39,7 @@ from dominio.excecoes import (
 from dominio.notificacao import Notificacao
 from dominio.pedido import Pedido
 from dominio.produto import Produto
+from dominio.rastreabilidade import Rastreabilidade
 
 
 class Empresa(ABC):
@@ -55,6 +60,7 @@ class Empresa(ABC):
         localizacao: str,
         abertura: time = time(7, 0),
         fechamento: time = time(18, 0),
+        coordenada: Coordenada | None = None,
         id: int | None = None,
     ) -> None:
         for campo, valor in (
@@ -77,6 +83,8 @@ class Empresa(ABC):
         self.localizacao = localizacao.strip()
         self.abertura = abertura
         self.fechamento = fechamento
+        # Posição real. Extensão além de P10, que não previa coordenadas.
+        self.coordenada = coordenada
         self.notificacoes: list[Notificacao] = []
 
     # Contrato abstrato: toda subclasse é obrigada a responder
@@ -90,6 +98,12 @@ class Empresa(ABC):
         """RN12: o que esta empresa pode ver do catálogo."""
 
     # Comum às duas
+
+    def distancia_ate(self, outra: Empresa) -> Decimal | None:
+        """Distância em km até outra empresa, quando as duas têm coordenada."""
+        if self.coordenada is None:
+            return None
+        return self.coordenada.distancia_km(getattr(outra, "coordenada", None))
 
     def esta_em_horario_de_funcionamento(self, agora: datetime | None = None) -> bool:
         """RN20 / P33: base do indicador vermelho."""
@@ -145,6 +159,9 @@ class EmpresaMarisqueira(Empresa):
         self.produtos: list[Produto] = []
         self.pedidos_recebidos: list[Pedido] = []
         self.avaliacoes: list[Avaliacao] = []
+        # Extensão além de P27. Por padrão aceita tudo; a empresa restringe
+        # se quiser, e o pedido valida contra esta lista.
+        self.formas_pagamento_aceitas: set[FormaPagamento] = set(FormaPagamento)
 
     def tipo(self) -> str:
         return "Empresa das marisqueiras"
@@ -279,6 +296,59 @@ class EmpresaMarisqueira(Empresa):
 
     # RN12: visibilidade: a marisqueira vê apenas os próprios produtos
 
+    def registrar_rastreabilidade(
+        self,
+        produto: Produto,
+        lote: str,
+        data_coleta,
+        local_coleta: str,
+        responsavel: str,
+        metodo: MetodoColeta = MetodoColeta.CATACAO_MANUAL,
+        coordenada=None,
+        observacoes: str | None = None,
+    ) -> Rastreabilidade:
+        """Preenche a ficha de origem do lote em venda.
+
+        Extensão além de P2. A ficha substitui a anterior porque representa o
+        lote que está na prateleira agora; os lotes já vendidos continuam
+        guardados nos itens dos pedidos.
+        """
+        self._exigir_propriedade(produto)
+        ficha = Rastreabilidade(
+            lote=lote,
+            data_coleta=data_coleta,
+            local_coleta=local_coleta,
+            responsavel=responsavel,
+            metodo=metodo,
+            coordenada=coordenada or self.coordenada,
+            observacoes=observacoes,
+        )
+        produto.rastreabilidade = ficha
+        return ficha
+
+    def confirmar_pagamento(self, pedido: Pedido) -> Pedido:
+        """Confirma que o dinheiro entrou. Extensão além de P27."""
+        self._exigir_pedido_proprio(pedido)
+        pedido.marcar_pagamento_confirmado()
+        pedido.compradora.notificar(
+            TipoNotificacao.PAGAMENTO_CONFIRMADO,
+            f"{self.nome} confirmou o pagamento em {pedido.forma_pagamento.rotulo}.",
+            pedido,
+        )
+        return pedido
+
+    def registrar_posicao(
+        self, pedido: Pedido, coordenada, descricao: str
+    ) -> EventoEntrega:
+        """Marca onde o entregador está. Extensão além de P10.
+
+        Não notifica a cada ponto de propósito: uma entrega gera dezenas de
+        posições e a caixa de avisos da compradora viraria spam. O aviso sai
+        no despacho e na chegada; o meio do caminho ela vê no mapa.
+        """
+        self._exigir_pedido_proprio(pedido)
+        return pedido.registrar_evento_entrega(coordenada, descricao)
+
     def consultar_produtos(
         self, catalogo: list[Produto] | None = None
     ) -> list[Produto]:
@@ -393,6 +463,7 @@ class EmpresaCompradora(Empresa):
         localizacao: str | None = None,
         empresa: EmpresaMarisqueira | None = None,
         avaliacao_minima: int | None = None,
+        raio_km: Decimal | int | None = None,
         ordenar_por: OrdenacaoBusca | None = None,
     ) -> list[Produto]:
         """RN10, RN11, RN12, P9, P21 e P22: busca no catálogo.
@@ -424,6 +495,15 @@ class EmpresaCompradora(Empresa):
                 for p in resultado
                 if p.empresa is not None
                 and p.empresa.media_avaliacoes >= Decimal(avaliacao_minima)
+            ]
+
+        # Extensão além de P10: filtra por distância real, não por texto.
+        if raio_km is not None:
+            limite = Decimal(str(raio_km))
+            resultado = [
+                p
+                for p in resultado
+                if (d := self.distancia_ate_produto(p)) is not None and d <= limite
             ]
 
         return self._ordenar(resultado, ordenar_por)
@@ -469,6 +549,7 @@ class EmpresaCompradora(Empresa):
         itens: list[tuple[Produto, Decimal]],
         endereco_entrega: str,
         tempo_entrega_dias: int,
+        forma_pagamento: FormaPagamento = FormaPagamento.PIX,
     ) -> Pedido:
         """RN13 a RN18 e P27: monta e envia o pedido.
 
@@ -483,6 +564,7 @@ class EmpresaCompradora(Empresa):
             compradora=self,
             endereco_entrega=endereco_entrega,
             tempo_entrega_dias=tempo_entrega_dias,
+            forma_pagamento=forma_pagamento,
         )
         for produto, quantidade in itens:
             pedido.adicionar_item(produto, quantidade)  # RN14 / RN15 / RN18
@@ -492,6 +574,12 @@ class EmpresaCompradora(Empresa):
         marisqueira = pedido.marisqueira
         if marisqueira is None:
             raise DadoObrigatorio("Não foi possível identificar a empresa vendedora.")
+        if forma_pagamento not in marisqueira.formas_pagamento_aceitas:
+            aceitas = ", ".join(f.rotulo for f in marisqueira.formas_pagamento_aceitas)
+            raise DadoObrigatorio(
+                f"{marisqueira.nome} não aceita {forma_pagamento.rotulo}. "
+                f"Formas aceitas: {aceitas}."
+            )
         marisqueira.receber_pedido(pedido)  # P7
 
         self.pedidos.append(pedido)
@@ -539,6 +627,28 @@ class EmpresaCompradora(Empresa):
                 pedido,
             )
         return pedido
+
+    def informar_pagamento(self, pedido: Pedido) -> Pedido:
+        """A compradora avisa que pagou. Extensão além de P27.
+
+        Não vale como pago: quem confirma é a marisqueira, que é quem vê o
+        dinheiro na conta.
+        """
+        self._exigir_pedido_proprio(pedido)
+        pedido.marcar_pagamento_informado()
+        if pedido.marisqueira is not None:
+            pedido.marisqueira.notificar(
+                TipoNotificacao.PAGAMENTO_INFORMADO,
+                f"{self.nome} informou pagamento de {pedido.total} em "
+                f"{pedido.forma_pagamento.rotulo}. Confirme o recebimento.",
+                pedido,
+            )
+        return pedido
+
+    def consultar_origem(self, pedido: Pedido) -> list[Rastreabilidade]:
+        """Fichas de origem dos itens comprados. Extensão além de P2."""
+        self._exigir_pedido_proprio(pedido)
+        return [item.origem for item in pedido.itens if item.origem is not None]
 
     def confirmar_entrega(self, pedido: Pedido) -> Pedido:
         """RN21 / RN22: a compradora atesta que recebeu a mercadoria.
@@ -622,12 +732,20 @@ class EmpresaCompradora(Empresa):
                 reverse=True,
             )
         if ordenar_por is OrdenacaoBusca.PROXIMIDADE:
-            minha = self.localizacao.casefold()
-            return sorted(
-                produtos,
-                key=lambda p: (
-                    p.localizacao.casefold() != minha,
-                    p.localizacao.casefold(),
-                ),
-            )
+            # Extensão além de P10: distância geodésica de verdade. Produto
+            # sem coordenada vai para o fim, com desempate por texto, que era
+            # o comportamento anterior.
+            def chave(produto: Produto):
+                distancia = self.distancia_ate_produto(produto)
+                if distancia is None:
+                    return (1, Decimal("0"), produto.localizacao.casefold())
+                return (0, distancia, produto.localizacao.casefold())
+
+            return sorted(produtos, key=chave)
         return produtos
+
+    def distancia_ate_produto(self, produto: Produto) -> Decimal | None:
+        """Km entre esta compradora e onde o produto está."""
+        if self.coordenada is None:
+            return None
+        return self.coordenada.distancia_km(produto.coordenada)

@@ -1,5 +1,6 @@
 # Execução do sistema
 PySide6>=6.11
+geopy>=2.4
 
 # Desenvolvimento (testes e formatação)
 pytest>=9.0

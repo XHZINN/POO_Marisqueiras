@@ -104,3 +104,54 @@ class TipoNotificacao(RotuladoEnum):
     SAIU_PARA_ENTREGA = ("saiu_para_entrega", "Pedido saiu para entrega")
     ENTREGA_CONFIRMADA = ("entrega_confirmada", "Entrega confirmada")
     AVALIACAO_RECEBIDA = ("avaliacao_recebida", "Avaliação recebida")
+    PAGAMENTO_INFORMADO = ("pagamento_informado", "Pagamento informado")
+    PAGAMENTO_CONFIRMADO = ("pagamento_confirmado", "Pagamento confirmado")
+
+
+class FormaPagamento(Enum):
+    """Formas de pagamento aceitas na plataforma.
+
+    Extensão além dos requisitos: P27 deixa pagamento fora do escopo. As
+    opções são as usuais de B2B no Brasil.
+
+    `antecipado` diz se o pagamento tem que estar confirmado antes do
+    despacho. Boleto a prazo é a exceção: a mercadoria sai antes.
+    """
+
+    PIX = ("pix", "PIX", True)
+    TRANSFERENCIA = ("transferencia", "Transferência bancária", True)
+    BOLETO = ("boleto", "Boleto à vista", True)
+    BOLETO_PRAZO = ("boleto_prazo", "Boleto a prazo, 30 dias", False)
+
+    def __new__(cls, codigo: str, rotulo: str, antecipado: bool):
+        obj = object.__new__(cls)
+        obj._value_ = codigo
+        obj.rotulo = rotulo
+        obj.antecipado = antecipado
+        return obj
+
+
+class StatusPagamento(RotuladoEnum):
+    """Andamento do pagamento, separado do andamento da entrega.
+
+    São dois eixos independentes: um pedido pode estar pago e não entregue
+    (PIX antecipado) ou entregue e não pago (boleto a prazo).
+    """
+
+    PENDENTE = ("pendente", "Pendente")
+    INFORMADO = ("informado", "Informado pela compradora")
+    CONFIRMADO = ("confirmado", "Confirmado")
+    ESTORNADO = ("estornado", "Estornado")
+
+
+class MetodoColeta(RotuladoEnum):
+    """Como o marisco foi coletado. Parte da ficha de origem.
+
+    Extensão além dos requisitos: P2 deixa rastreabilidade como
+    possibilidade futura.
+    """
+
+    CATACAO_MANUAL = ("catacao_manual", "Catação manual")
+    MERGULHO = ("mergulho", "Mergulho livre")
+    REDE = ("rede", "Rede de arrasto")
+    ARMADILHA = ("armadilha", "Armadilha e covo")

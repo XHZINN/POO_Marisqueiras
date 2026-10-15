@@ -17,7 +17,10 @@ CREATE TABLE IF NOT EXISTS empresa (
     endereco     TEXT NOT NULL,
     localizacao  TEXT NOT NULL,                     -- P21: filtro de busca
     abertura     TEXT NOT NULL,                     -- "HH:MM" (RN20)
-    fechamento   TEXT NOT NULL
+    fechamento   TEXT NOT NULL,
+    -- Posição real. Extensão além de P10.
+    latitude     REAL,
+    longitude    REAL
 );
 
 CREATE TABLE IF NOT EXISTS produto (
@@ -46,7 +49,14 @@ CREATE TABLE IF NOT EXISTS pedido (
     tempo_entrega_dias  INTEGER NOT NULL,           -- RN13
     criado_em           TEXT NOT NULL,
     motivo_rejeicao     TEXT,
-    observacao_ajuste   TEXT
+    observacao_ajuste   TEXT,
+    -- Pagamento. Extensão além de P27.
+    forma_pagamento     TEXT NOT NULL DEFAULT 'pix',
+    status_pagamento    TEXT NOT NULL DEFAULT 'pendente',
+    pago_em             TEXT,
+    -- Destino da entrega. Extensão além de P10.
+    entrega_latitude    REAL,
+    entrega_longitude   REAL
 );
 
 CREATE TABLE IF NOT EXISTS item_pedido (
@@ -56,7 +66,17 @@ CREATE TABLE IF NOT EXISTS item_pedido (
     quantidade_kg   TEXT NOT NULL,                  -- RN15: mínimo 25 por item
     -- RN07: cópia do preço no momento da compra. Se fosse um JOIN com
     -- produto.preco_por_kg, reajustar o preço reescreveria o histórico.
-    preco_unitario  TEXT NOT NULL
+    preco_unitario  TEXT NOT NULL,
+    -- Ficha de origem congelada na venda, mesma ideia de RN07 com o preço.
+    -- Extensão além de P2.
+    origem_lote          TEXT,
+    origem_data_coleta   TEXT,
+    origem_local         TEXT,
+    origem_responsavel   TEXT,
+    origem_metodo        TEXT,
+    origem_latitude      REAL,
+    origem_longitude     REAL,
+    origem_observacoes   TEXT
 );
 
 CREATE TABLE IF NOT EXISTS avaliacao (
@@ -81,6 +101,39 @@ CREATE TABLE IF NOT EXISTS notificacao (
     lida             INTEGER NOT NULL DEFAULT 0
 );
 
+CREATE TABLE IF NOT EXISTS empresa_forma_pagamento (
+    empresa_id  INTEGER NOT NULL REFERENCES empresa(id) ON DELETE CASCADE,
+    forma       TEXT NOT NULL,
+    PRIMARY KEY (empresa_id, forma)
+);
+
+-- Ficha do lote que está à venda agora. Extensão além de P2.
+CREATE TABLE IF NOT EXISTS rastreabilidade (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    -- UNIQUE: um lote em venda por produto. Os anteriores ficam guardados
+    -- nas colunas origem_* de item_pedido.
+    produto_id    INTEGER NOT NULL UNIQUE REFERENCES produto(id) ON DELETE CASCADE,
+    lote          TEXT NOT NULL,
+    data_coleta   TEXT NOT NULL,
+    local_coleta  TEXT NOT NULL,
+    responsavel   TEXT NOT NULL,
+    metodo        TEXT NOT NULL,
+    latitude      REAL,
+    longitude     REAL,
+    observacoes   TEXT
+);
+
+-- Trajeto da entrega, append-only. Extensão além de P10.
+CREATE TABLE IF NOT EXISTS evento_entrega (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    pedido_id      INTEGER NOT NULL REFERENCES pedido(id) ON DELETE CASCADE,
+    latitude       REAL NOT NULL,
+    longitude      REAL NOT NULL,
+    descricao      TEXT NOT NULL,
+    registrado_em  TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_evento_pedido ON evento_entrega(pedido_id, id);
 CREATE INDEX IF NOT EXISTS idx_notificacao_destinatario
     ON notificacao(destinatario_id, lida);
 CREATE INDEX IF NOT EXISTS idx_produto_empresa ON produto(empresa_id);

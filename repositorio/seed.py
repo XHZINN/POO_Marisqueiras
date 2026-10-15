@@ -6,11 +6,23 @@ conteúdo navegável em vez de telas em branco.
 
 from __future__ import annotations
 
-from datetime import time
+from datetime import date, time, timedelta
 from decimal import Decimal
 
+from dominio.coordenada import (
+    ARACAGI,
+    MERCADO_DO_PEIXE,
+    RAPOSA,
+    SAO_LUIS_CENTRO,
+    VILA_MARESIA,
+)
 from dominio.empresa import EmpresaCompradora, EmpresaMarisqueira
-from dominio.enums import Categoria, StatusEntrega
+from dominio.enums import (
+    Categoria,
+    FormaPagamento,
+    MetodoColeta,
+    StatusEntrega,
+)
 from repositorio.repositorio import Repositorio
 
 
@@ -26,6 +38,7 @@ def popular(repo: Repositorio) -> None:
             telefone="(98) 98800-1001",
             endereco="Rua da Praia, 10, Vila Maresia",
             localizacao="Raposa/MA",
+            coordenada=VILA_MARESIA,
             abertura=time(6, 0),
             fechamento=time(18, 0),
         )
@@ -38,6 +51,7 @@ def popular(repo: Repositorio) -> None:
             telefone="(98) 98800-1002",
             endereco="Travessa do Porto, 7, Vila Maresia",
             localizacao="Raposa/MA",
+            coordenada=RAPOSA,
             abertura=time(5, 30),
             fechamento=time(17, 0),
         )
@@ -50,6 +64,7 @@ def popular(repo: Repositorio) -> None:
             telefone="(98) 98800-1003",
             endereco="Av. Litorânea, 520",
             localizacao="São Luís/MA",
+            coordenada=ARACAGI,
             abertura=time(7, 0),
             fechamento=time(19, 0),
         )
@@ -64,6 +79,7 @@ def popular(repo: Repositorio) -> None:
             telefone="(98) 98800-2001",
             endereco="Rua do Giz, 120, Centro",
             localizacao="São Luís/MA",
+            coordenada=SAO_LUIS_CENTRO,
         )
     )
     repo.salvar_empresa(
@@ -74,6 +90,7 @@ def popular(repo: Repositorio) -> None:
             telefone="(98) 98800-2002",
             endereco="Mercado do Peixe, Box 14",
             localizacao="Raposa/MA",
+            coordenada=MERCADO_DO_PEIXE,
         )
     )
 
@@ -115,6 +132,92 @@ def popular(repo: Repositorio) -> None:
     for produto in produtos:
         repo.salvar_produto(produto)
 
+    # Fichas de origem dos lotes. Extensão além de P2.
+    hoje = date.today()
+    fichas = [
+        (
+            produtos[0],
+            "SUR-2410-A",
+            0,
+            "Baixio da Raposa",
+            "Dona Marlene",
+            MetodoColeta.CATACAO_MANUAL,
+        ),
+        (
+            produtos[1],
+            "SUR-2410-B",
+            2,
+            "Baixio da Raposa",
+            "Dona Marlene",
+            MetodoColeta.CATACAO_MANUAL,
+        ),
+        (
+            produtos[2],
+            "OST-2410-A",
+            1,
+            "Croa do Boqueirão",
+            "Seu Raimundo",
+            MetodoColeta.MERGULHO,
+        ),
+        (
+            produtos[3],
+            "CAM-2410-A",
+            3,
+            "Canal da Raposa",
+            "Dona Marlene",
+            MetodoColeta.REDE,
+        ),
+        (
+            produtos[4],
+            "SUR-2410-C",
+            0,
+            "Manguezal do Porto",
+            "Dona Rosa",
+            MetodoColeta.CATACAO_MANUAL,
+        ),
+        (
+            produtos[5],
+            "CAR-2410-A",
+            1,
+            "Manguezal do Porto",
+            "Dona Rosa",
+            MetodoColeta.ARMADILHA,
+        ),
+        (
+            produtos[7],
+            "SUR-2410-D",
+            2,
+            "Praia do Araçagi",
+            "Seu Benedito",
+            MetodoColeta.CATACAO_MANUAL,
+        ),
+        (
+            produtos[8],
+            "CAM-2410-B",
+            1,
+            "Praia do Araçagi",
+            "Seu Benedito",
+            MetodoColeta.REDE,
+        ),
+    ]
+    for produto, lote, dias, local, responsavel, metodo in fichas:
+        produto.empresa.registrar_rastreabilidade(
+            produto=produto,
+            lote=lote,
+            data_coleta=hoje - timedelta(days=dias),
+            local_coleta=local,
+            responsavel=responsavel,
+            metodo=metodo,
+        )
+        repo.salvar_produto(produto)
+
+    # Dona Rosa só trabalha com PIX e dinheiro na entrega.
+    dona_rosa.formas_pagamento_aceitas = {
+        FormaPagamento.PIX,
+        FormaPagamento.TRANSFERENCIA,
+    }
+    repo.salvar_empresa(dona_rosa)  # regrava as formas aceitas
+
     # RN09: um produto com estoque zerado, para a busca mostrar o caso.
     ostra_congelada = produtos[6]
     dona_rosa.alterar_quantidade(ostra_congelada, Decimal("0"))
@@ -128,6 +231,8 @@ def popular(repo: Repositorio) -> None:
         3,
     )
     maresia.aceitar_pedido(entregue)
+    mare_alta.informar_pagamento(entregue)
+    maresia.confirmar_pagamento(entregue)  # PIX é antecipado: paga antes de sair
     maresia.atualizar_status_entrega(entregue, StatusEntrega.SAIU_PARA_ENTREGA)
     mare_alta.confirmar_entrega(entregue)  # quem recebe é quem confirma
     repo.salvar_pedido(entregue)
@@ -143,6 +248,8 @@ def popular(repo: Repositorio) -> None:
         2,
     )
     dona_rosa.aceitar_pedido(entregue_rosa)
+    mare_alta.informar_pagamento(entregue_rosa)
+    dona_rosa.confirmar_pagamento(entregue_rosa)
     dona_rosa.atualizar_status_entrega(entregue_rosa, StatusEntrega.SAIU_PARA_ENTREGA)
     mare_alta.confirmar_entrega(entregue_rosa)
     repo.salvar_pedido(entregue_rosa)
@@ -177,7 +284,16 @@ def popular(repo: Repositorio) -> None:
         [(produtos[9], Decimal("90"))],
         "Rua do Giz, 120, Centro, São Luís/MA",
         2,
+        forma_pagamento=FormaPagamento.BOLETO_PRAZO,  # sai antes de pagar
     )
     aracagi.aceitar_pedido(em_rota)
     aracagi.atualizar_status_entrega(em_rota, StatusEntrega.SAIU_PARA_ENTREGA)
+    # Trajeto já iniciado, para o mapa abrir com algo desenhado.
+    origem = em_rota.coordenada_origem
+    destino = em_rota.coordenada_entrega
+    if origem is not None and destino is not None:
+        aracagi.registrar_posicao(em_rota, origem, "Saída do entreposto")
+        aracagi.registrar_posicao(
+            em_rota, origem.interpolar(destino, 0.35), "Na MA-203"
+        )
     repo.salvar_pedido(em_rota)

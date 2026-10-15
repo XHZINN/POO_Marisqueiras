@@ -9,7 +9,14 @@ from datetime import datetime
 from decimal import Decimal
 from typing import TYPE_CHECKING
 
-from dominio.enums import StatusEntrega, StatusPedido
+from dominio.coordenada import Coordenada
+from dominio.entrega import EventoEntrega
+from dominio.enums import (
+    FormaPagamento,
+    StatusEntrega,
+    StatusPagamento,
+    StatusPedido,
+)
 from dominio.excecoes import (
     DadoObrigatorio,
     EmpresasDiferentesNoPedido,
@@ -62,6 +69,9 @@ class Pedido:
         marisqueira: EmpresaMarisqueira | None = None,
         status: StatusPedido = StatusPedido.AGUARDANDO_ANALISE,
         status_entrega: StatusEntrega = StatusEntrega.NAO_INICIADA,
+        forma_pagamento: FormaPagamento = FormaPagamento.PIX,
+        status_pagamento: StatusPagamento = StatusPagamento.PENDENTE,
+        coordenada_entrega: Coordenada | None = None,
         criado_em: datetime | None = None,
         id: int | None = None,
     ) -> None:
@@ -84,6 +94,20 @@ class Pedido:
         self.itens: list[ItemPedido] = []
         self.motivo_rejeicao: str | None = None
         self.observacao_ajuste: str | None = None
+
+        # Pagamento. Extensão além de P27, que o deixava fora do escopo.
+        if not isinstance(forma_pagamento, FormaPagamento):
+            raise DadoObrigatorio("Escolha uma forma de pagamento.")
+        self.forma_pagamento = forma_pagamento
+        self.status_pagamento = status_pagamento
+        self.pago_em: datetime | None = None
+
+        # Rastreamento. Extensão além de P10, que não previa tempo real.
+        # Sem coordenada informada, usa a da compradora.
+        self.coordenada_entrega = coordenada_entrega or getattr(
+            compradora, "coordenada", None
+        )
+        self.eventos_entrega: list[EventoEntrega] = []
 
     # Métodos exigidos pela atividade
 
@@ -179,6 +203,12 @@ class Pedido:
                 "recebe a mercadoria. A marisqueira informa até "
                 f"'{StatusEntrega.SAIU_PARA_ENTREGA.rotulo}'."
             )
+        if novo is StatusEntrega.SAIU_PARA_ENTREGA and self.pagamento_pendente:
+            raise TransicaoInvalida(
+                f"O pagamento em {self.forma_pagamento.rotulo} precisa estar "
+                "confirmado antes do despacho (situação atual: "
+                f"'{self.status_pagamento.rotulo}')."
+            )
         self.status_entrega = novo
         if (
             novo is StatusEntrega.SAIU_PARA_ENTREGA
@@ -200,6 +230,39 @@ class Pedido:
             )
         self._mudar_status(StatusPedido.ENTREGUE)
         self.status_entrega = StatusEntrega.ENTREGUE
+
+    def marcar_pagamento_informado(self) -> None:
+        """A compradora diz que pagou. Ainda não vale como pago."""
+        if self.status_pagamento is StatusPagamento.CONFIRMADO:
+            raise TransicaoInvalida("Este pedido já está com pagamento confirmado.")
+        if self.status is StatusPedido.CANCELADO:
+            raise TransicaoInvalida("Pedido cancelado não recebe pagamento.")
+        self.status_pagamento = StatusPagamento.INFORMADO
+
+    def marcar_pagamento_confirmado(self) -> None:
+        """A marisqueira confirma que o dinheiro entrou."""
+        if self.status_pagamento is StatusPagamento.CONFIRMADO:
+            raise TransicaoInvalida("Este pagamento já foi confirmado.")
+        self.status_pagamento = StatusPagamento.CONFIRMADO
+        self.pago_em = datetime.now()
+
+    def registrar_evento_entrega(
+        self, coordenada: Coordenada, descricao: str
+    ) -> EventoEntrega:
+        """Acrescenta uma posição ao trajeto.
+
+        Só depois do despacho: antes disso não existe veículo na rua.
+        """
+        if self.status_entrega not in (
+            StatusEntrega.SAIU_PARA_ENTREGA,
+            StatusEntrega.ENTREGUE,
+        ):
+            raise TransicaoInvalida(
+                "O trajeto só é registrado depois que o pedido sai para entrega."
+            )
+        evento = EventoEntrega(self, coordenada, descricao)
+        self.eventos_entrega.append(evento)
+        return evento
 
     def marcar_cancelado(self) -> None:
         """A compradora desiste do pedido antes do aceite."""
@@ -277,6 +340,63 @@ class Pedido:
     @property
     def pode_ser_cancelado(self) -> bool:
         return StatusPedido.CANCELADO in self.TRANSICOES_PERMITIDAS[self.status]
+
+    @property
+    def pagamento_pendente(self) -> bool:
+        """Falta pagar antes do despacho?
+
+        Só trava quando a forma é antecipada. Boleto a prazo sai antes de
+        o dinheiro entrar, que é o combinado dele.
+        """
+        return (
+            self.forma_pagamento.antecipado
+            and self.status_pagamento is not StatusPagamento.CONFIRMADO
+        )
+
+    @property
+    def coordenada_origem(self) -> Coordenada | None:
+        return self.marisqueira.coordenada if self.marisqueira is not None else None
+
+    @property
+    def distancia_total_km(self) -> Decimal | None:
+        origem = self.coordenada_origem
+        if origem is None:
+            return None
+        return origem.distancia_km(self.coordenada_entrega)
+
+    @property
+    def posicao_atual(self) -> Coordenada | None:
+        """Onde a carga está.
+
+        Entregue vale como estando no destino, mesmo sem trajeto registrado:
+        o pedido chegou, independente de alguém ter marcado as posições.
+        """
+        if self.status is StatusPedido.ENTREGUE and self.coordenada_entrega:
+            return self.coordenada_entrega
+        if self.eventos_entrega:
+            return self.eventos_entrega[-1].coordenada
+        return self.coordenada_origem
+
+    @property
+    def distancia_restante_km(self) -> Decimal | None:
+        posicao = self.posicao_atual
+        if posicao is None:
+            return None
+        return posicao.distancia_km(self.coordenada_entrega)
+
+    @property
+    def progresso_percentual(self) -> int:
+        """Quanto do trajeto já foi andado, de 0 a 100."""
+        total = self.distancia_total_km
+        restante = self.distancia_restante_km
+        if not total or total <= 0 or restante is None:
+            return 100 if self.status is StatusPedido.ENTREGUE else 0
+        andado = max(Decimal("0"), total - restante)
+        return int(min(Decimal("100"), andado / total * 100))
+
+    @property
+    def em_transito(self) -> bool:
+        return self.status_entrega is StatusEntrega.SAIU_PARA_ENTREGA
 
     def __repr__(self) -> str:
         return (

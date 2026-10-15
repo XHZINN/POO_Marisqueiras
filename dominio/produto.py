@@ -8,8 +8,10 @@ from __future__ import annotations
 from decimal import Decimal
 from typing import TYPE_CHECKING
 
+from dominio.coordenada import Coordenada
 from dominio.enums import Categoria, SituacaoEmpresa
 from dominio.excecoes import DadoObrigatorio, QuantidadeInvalida
+from dominio.rastreabilidade import Rastreabilidade
 
 if TYPE_CHECKING:  # evita import circular: só o verificador de tipos avalia
     from dominio.empresa import EmpresaMarisqueira
@@ -35,6 +37,7 @@ class Produto:
         localizacao: str,
         empresa: EmpresaMarisqueira | None = None,
         foto: str | None = None,
+        rastreabilidade: Rastreabilidade | None = None,
         id: int | None = None,
     ) -> None:
         """Monta o produto.
@@ -63,6 +66,8 @@ class Produto:
         self.localizacao = localizacao.strip()
         self.empresa = empresa
         self.foto = foto  # P15: o único campo opcional do cadastro
+        # Ficha do lote que está em venda. Extensão além de P2.
+        self.rastreabilidade = rastreabilidade
 
     # Métodos exigidos pela atividade
 
@@ -134,6 +139,15 @@ class Produto:
         if self.esta_disponivel:
             return SituacaoEmpresa.DISPONIVEL
         return SituacaoEmpresa.ESTOQUE_BAIXO
+
+    @property
+    def coordenada(self) -> Coordenada | None:
+        """Onde o produto está, que é onde a empresa dona está."""
+        return self.empresa.coordenada if self.empresa is not None else None
+
+    @property
+    def tem_origem(self) -> bool:
+        return self.rastreabilidade is not None
 
     @property
     def nome_exibicao(self) -> str:

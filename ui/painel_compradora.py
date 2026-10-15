@@ -9,6 +9,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from decimal import Decimal
 
+from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import (
     QComboBox,
     QDialog,
@@ -22,6 +23,7 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QListWidget,
     QMessageBox,
+    QProgressBar,
     QPushButton,
     QSpinBox,
     QTabWidget,
@@ -32,7 +34,13 @@ from PySide6.QtWidgets import (
 
 from dominio.avaliacao import Avaliacao
 from dominio.empresa import EmpresaCompradora
-from dominio.enums import Categoria, OrdenacaoBusca, StatusPedido
+from dominio.enums import (
+    Categoria,
+    FormaPagamento,
+    OrdenacaoBusca,
+    StatusPagamento,
+    StatusPedido,
+)
 from dominio.pedido import Pedido
 from dominio.produto import Produto
 from repositorio.repositorio import Repositorio
@@ -44,6 +52,7 @@ from ui.componentes import (
     celula_status,
     celula_suave,
     divisor,
+    estilo_barra,
     estrelas,
     kg,
     metrica,
@@ -54,6 +63,7 @@ from ui.componentes import (
     tabela,
 )
 from ui.estilo import LARANJA, PRIMARIA, TEXTO_SUAVE, VERDE
+from ui.mapa import WidgetMapa
 from ui.painel_notificacoes import PainelNotificacoes
 
 TODAS = "Todas"
@@ -248,6 +258,64 @@ class DialogoComparacao(QDialog):
         layout.addWidget(botoes)
 
 
+class DialogoOrigemPedido(QDialog):
+    """Fichas de origem dos itens comprados. Extensão além de P2."""
+
+    def __init__(self, pai, pedido: Pedido, fichas: list) -> None:
+        super().__init__(pai)
+        self.setWindowTitle("Origem dos produtos")
+        self.setMinimumSize(820, 360)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(26, 24, 26, 20)
+        layout.setSpacing(14)
+        titulo = QLabel(f"Pedido {pedido.id}")
+        titulo.setObjectName("titulo")
+        layout.addWidget(titulo)
+        legenda = QLabel(
+            "Estes são os lotes que foram efetivamente vendidos neste pedido, "
+            "congelados no momento da compra."
+        )
+        legenda.setObjectName("subtitulo")
+        legenda.setWordWrap(True)
+        layout.addWidget(legenda)
+
+        grade = tabela(
+            ["Produto", "Lote", "Coleta", "Idade", "Local", "Método", "Responsável"],
+            largura_fixa={1: 120, 2: 100, 3: 80},
+        )
+        grade.setRowCount(len(pedido.itens))
+        linha = 0
+        for item in pedido.itens:
+            origem = item.origem
+            if origem is None:
+                continue
+            fresco = origem.dentro_da_validade_sugerida
+            grade.setItem(linha, 0, celula(item.produto.nome_exibicao, negrito=True))
+            grade.setItem(linha, 1, celula(origem.lote))
+            grade.setItem(linha, 2, celula_suave(f"{origem.data_coleta:%d/%m/%Y}"))
+            grade.setItem(
+                linha,
+                3,
+                celula(
+                    f"{origem.idade_em_dias} dia(s)",
+                    VERDE if fresco else LARANJA,
+                    negrito=not fresco,
+                ),
+            )
+            grade.setItem(linha, 4, celula(origem.local_coleta))
+            grade.setItem(linha, 5, celula_suave(origem.metodo.rotulo))
+            grade.setItem(linha, 6, celula(origem.responsavel))
+            linha += 1
+        grade.setRowCount(linha)
+        layout.addWidget(grade)
+
+        botoes = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        botoes.button(QDialogButtonBox.StandardButton.Close).setText("Fechar")
+        botoes.rejected.connect(self.reject)
+        layout.addWidget(botoes)
+
+
 class PainelCompradora(QWidget):
     def __init__(
         self,
@@ -263,6 +331,10 @@ class PainelCompradora(QWidget):
         self._pedidos_na_tabela: list[Pedido] = []
         # Carrinho: pares (produto, quantidade_kg) até virar um Pedido.
         self._carrinho: list[tuple[Produto, Decimal]] = []
+        # Extensão além de P10: relê o trajeto a cada 2s durante o trânsito.
+        self.timer_rastreio = QTimer(self)
+        self.timer_rastreio.setInterval(2000)
+        self.timer_rastreio.timeout.connect(self._reler_trajeto)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -298,6 +370,7 @@ class PainelCompradora(QWidget):
                 "Preço por kg",
                 "Estoque",
                 "Avaliação",
+                "Distância",
                 "Situação",
             ]
         )
@@ -353,6 +426,12 @@ class PainelCompradora(QWidget):
             self.f_avaliacao.addItem("★" * nota, nota)
         self.f_avaliacao.currentIndexChanged.connect(self._buscar)
 
+        self.f_raio = QComboBox()
+        self.f_raio.addItem("Sem limite", None)
+        for km in (5, 10, 20, 30, 50):
+            self.f_raio.addItem(f"Até {km} km", km)
+        self.f_raio.currentIndexChanged.connect(self._buscar)
+
         self.f_ordenacao = QComboBox()
         self.f_ordenacao.addItem("Relevância", None)
         for ordem in OrdenacaoBusca:
@@ -365,6 +444,7 @@ class PainelCompradora(QWidget):
             ("Localização", self.f_localizacao, 1),
             ("Empresa", self.f_empresa, 2),
             ("Avaliação", self.f_avaliacao, 1),
+            ("Distância", self.f_raio, 1),
             ("Ordenar por", self.f_ordenacao, 1),
         ]
         for rotulo, campo, peso in campos:
@@ -408,8 +488,12 @@ class PainelCompradora(QWidget):
         self.in_prazo.setRange(1, 60)
         self.in_prazo.setValue(3)
         self.in_prazo.setSuffix(" dia(s)")
+        self.in_pagamento = QComboBox()
+        for forma in FormaPagamento:
+            self.in_pagamento.addItem(forma.rotulo, forma)
         formulario.addRow("Endereço de entrega", self.in_endereco)
         formulario.addRow("Tempo de entrega", self.in_prazo)
+        formulario.addRow("Pagamento", self.in_pagamento)
         layout.addLayout(formulario)
 
         layout.addWidget(rotulo_secao("Total"))
@@ -431,6 +515,7 @@ class PainelCompradora(QWidget):
             localizacao=self.f_localizacao.currentData(),
             empresa=self.f_empresa.currentData(),
             avaliacao_minima=self.f_avaliacao.currentData(),
+            raio_km=self.f_raio.currentData(),
             ordenar_por=self.f_ordenacao.currentData(),
         )
         self.lbl_resultados.setText(f"{len(self._resultados)} produto(s)")
@@ -448,8 +533,15 @@ class PainelCompradora(QWidget):
                 linha, 5, celula_numero(kg(produto.quantidade_disponivel_kg))
             )
             self.tbl_busca.setItem(linha, 6, celula_suave(estrelas(nota)))
+            # Extensão além de P10: distância geodésica, não comparação textual.
+            distancia = self.empresa.distancia_ate_produto(produto)
+            self.tbl_busca.setItem(
+                linha,
+                7,
+                celula_numero(f"{distancia} km") if distancia else celula_suave(""),
+            )
             # RN09 e P20: sem estoque continua listado, marcado indisponível.
-            self.tbl_busca.setItem(linha, 7, celula_situacao(produto.situacao))
+            self.tbl_busca.setItem(linha, 8, celula_situacao(produto.situacao))
 
     def _produtos_selecionados(self) -> list[Produto]:
         linhas = sorted({indice.row() for indice in self.tbl_busca.selectedIndexes()})
@@ -549,6 +641,7 @@ class PainelCompradora(QWidget):
                 itens=list(self._carrinho),
                 endereco_entrega=self.in_endereco.text(),
                 tempo_entrega_dias=self.in_prazo.value(),
+                forma_pagamento=self.in_pagamento.currentData(),
             )
             self.repo.salvar_pedido(pedido)
 
@@ -609,6 +702,22 @@ class PainelCompradora(QWidget):
         layout.addWidget(self.lbl_pedido_info)
         layout.addWidget(divisor())
 
+        # Extensão além de P10: mapa do trajeto, com atualização por timer.
+        layout.addWidget(rotulo_secao("Entrega"))
+        self.mapa = WidgetMapa()
+        self.mapa.setMinimumHeight(190)
+        layout.addWidget(self.mapa)
+        self.barra_entrega = QProgressBar()
+        self.barra_entrega.setRange(0, 100)
+        self.barra_entrega.setTextVisible(False)
+        self.barra_entrega.setFixedHeight(6)
+        self.barra_entrega.setStyleSheet(estilo_barra(6))
+        layout.addWidget(self.barra_entrega)
+        self.lbl_trajeto = QLabel()
+        self.lbl_trajeto.setObjectName("meta")
+        layout.addWidget(self.lbl_trajeto)
+        layout.addWidget(divisor())
+
         layout.addWidget(rotulo_secao("Itens"))
         self.lst_itens_pedido = QListWidget()
         self.lst_itens_pedido.setObjectName("carrinho")
@@ -632,6 +741,17 @@ class PainelCompradora(QWidget):
         self.btn_avaliar = QPushButton("Avaliar empresa")
         self.btn_avaliar.clicked.connect(self._avaliar)
         layout.addWidget(self.btn_avaliar)
+
+        pagamento = QHBoxLayout()
+        pagamento.setSpacing(10)
+        self.btn_pagar = QPushButton("Informar pagamento")
+        self.btn_pagar.clicked.connect(self._informar_pagamento)
+        self.btn_origem = QPushButton("Ver origem")
+        self.btn_origem.setObjectName("secundario")
+        self.btn_origem.clicked.connect(self._ver_origem)
+        pagamento.addWidget(self.btn_pagar)
+        pagamento.addWidget(self.btn_origem)
+        layout.addLayout(pagamento)
 
         resposta = QHBoxLayout()
         resposta.setSpacing(10)
@@ -674,6 +794,40 @@ class PainelCompradora(QWidget):
 
         if protegido(self, acao, "Avaliação registrada."):
             self.ao_alterar()
+
+    def _informar_pagamento(self) -> None:
+        """Extensão além de P27: a compradora avisa que pagou."""
+        pedido = self._pedido_selecionado()
+        if pedido is None:
+            return
+
+        def acao() -> None:
+            self.empresa.informar_pagamento(pedido)
+            self.repo.salvar_pedido(pedido)
+
+        if protegido(
+            self, acao, "Pagamento informado. Aguarde a confirmação da vendedora."
+        ):
+            self.ao_alterar()
+
+    def _ver_origem(self) -> None:
+        """Extensão além de P2: ficha de origem dos itens comprados."""
+        pedido = self._pedido_selecionado()
+        if pedido is None:
+            return
+        fichas: list = []
+
+        def acao() -> None:
+            fichas.extend(self.empresa.consultar_origem(pedido))
+
+        if not protegido(self, acao):
+            return
+        if not fichas:
+            QMessageBox.information(
+                self, "Origem", "Os itens deste pedido não têm ficha de origem."
+            )
+            return
+        DialogoOrigemPedido(self, pedido, fichas).exec()
 
     def _ajustar(self) -> None:
         """P7: responde ao pedido de ajuste com as quantidades corrigidas."""
@@ -743,8 +897,12 @@ class PainelCompradora(QWidget):
                 self.btn_ajustar,
                 self.btn_cancelar,
                 self.btn_confirmar,
+                self.btn_pagar,
+                self.btn_origem,
             ):
                 botao.setEnabled(False)
+            self.mapa.definir_rota(None, None)
+            self.barra_entrega.setValue(0)
             return
 
         self.lbl_pedido_numero.setText(f"Pedido {pedido.id}")
@@ -753,7 +911,9 @@ class PainelCompradora(QWidget):
             f"{pedido.marisqueira.nome if pedido.marisqueira else ''}\n"
             f"{pedido.endereco_entrega}\n"
             f"Prazo de {pedido.tempo_entrega_dias} dia(s) · "
-            f"entrega {pedido.status_entrega.rotulo.lower()}"
+            f"entrega {pedido.status_entrega.rotulo.lower()}\n"
+            f"{pedido.forma_pagamento.rotulo} · "
+            f"pagamento {pedido.status_pagamento.rotulo.lower()}"
         )
         for item in pedido.itens:
             self.lst_itens_pedido.addItem(
@@ -789,6 +949,53 @@ class PainelCompradora(QWidget):
         self.btn_ajustar.setEnabled(pedido.aguarda_resposta_da_compradora)
         self.btn_cancelar.setEnabled(pedido.pode_ser_cancelado)
         self.btn_confirmar.setEnabled(pedido.pode_confirmar_recebimento)
+        # Extensão além de P27: informar pagamento só antes de confirmado.
+        self.btn_pagar.setEnabled(
+            pedido.status_pagamento is StatusPagamento.PENDENTE
+            and pedido.status not in (StatusPedido.CANCELADO, StatusPedido.REJEITADO)
+        )
+        self.btn_origem.setEnabled(any(i.origem for i in pedido.itens))
+        self._atualizar_mapa(pedido)
+
+    def _atualizar_mapa(self, pedido: Pedido) -> None:
+        """Pinta o trajeto do pedido e liga ou desliga o acompanhamento."""
+        self.mapa.definir_rota(
+            origem=pedido.coordenada_origem,
+            destino=pedido.coordenada_entrega,
+            trajeto=[e.coordenada for e in pedido.eventos_entrega],
+            posicao=pedido.posicao_atual,
+            rotulo_origem=(pedido.marisqueira.nome if pedido.marisqueira else "Origem"),
+            rotulo_destino=self.empresa.nome,
+        )
+        self.barra_entrega.setValue(pedido.progresso_percentual)
+
+        total = pedido.distancia_total_km
+        restante = pedido.distancia_restante_km
+        if pedido.em_transito and total:
+            self.lbl_trajeto.setText(
+                f"Faltam {restante} km de {total} km · "
+                f"{pedido.progresso_percentual}% do caminho"
+            )
+        elif total:
+            self.lbl_trajeto.setText(f"{total} km até o endereço de entrega")
+        else:
+            self.lbl_trajeto.setText("")
+
+        # O trajeto é gravado pelo outro perfil, então esta tela precisa
+        # reler sozinha. Timer só roda enquanto há entrega em curso.
+        if pedido.em_transito:
+            if not self.timer_rastreio.isActive():
+                self.timer_rastreio.start()
+        else:
+            self.timer_rastreio.stop()
+
+    def _reler_trajeto(self) -> None:
+        pedido = self._pedido_selecionado()
+        if pedido is None or not pedido.em_transito:
+            self.timer_rastreio.stop()
+            return
+        self.repo.recarregar_trajeto(pedido)
+        self._atualizar_mapa(pedido)
 
     def atualizar(self) -> None:
         self._recarregar_filtros()

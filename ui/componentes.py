@@ -174,6 +174,21 @@ def metrica(rotulo: str, valor: str) -> QFrame:
     return moldura
 
 
+def estilo_barra(altura: int = 8) -> str:
+    """QSS da barra de progresso da entrega.
+
+    Fica aqui porque montar isso na mão em cada tela já gerou chave dobrada
+    e folha de estilo inválida, que o Qt engole calado.
+    """
+    raio = altura // 2
+    return (
+        f"QProgressBar {{ background: {estilo.BORDA}; border: none;"
+        f" border-radius: {raio}px; }}"
+        f"QProgressBar::chunk {{ background: {estilo.PRIMARIA};"
+        f" border-radius: {raio}px; }}"
+    )
+
+
 def divisor() -> QFrame:
     linha = QFrame()
     linha.setObjectName("divisor")

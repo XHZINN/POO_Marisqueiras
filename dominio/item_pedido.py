@@ -9,6 +9,7 @@ from decimal import Decimal
 from typing import TYPE_CHECKING
 
 from dominio.excecoes import QuantidadeIndisponivel, QuantidadeInvalida
+from dominio.rastreabilidade import Rastreabilidade
 
 if TYPE_CHECKING:
     from dominio.produto import Produto
@@ -26,6 +27,7 @@ class ItemPedido:
         produto: Produto,
         quantidade_kg: Decimal,
         preco_unitario: Decimal | None = None,
+        origem: Rastreabilidade | None = None,
         id: int | None = None,
     ) -> None:
         self.id = id
@@ -38,6 +40,15 @@ class ItemPedido:
             if preco_unitario is not None
             else produto.preco_por_kg
         )
+
+        # Mesma ideia de RN07 com o preço: congela o lote vendido. Se a
+        # marisqueira cadastrar outro lote amanhã, este pedido não muda.
+        if origem is not None:
+            self.origem = origem
+        elif produto.rastreabilidade is not None:
+            self.origem = produto.rastreabilidade.copiar()
+        else:
+            self.origem = None
 
         self.validar_quantidade()
 

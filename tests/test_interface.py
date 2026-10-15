@@ -250,7 +250,7 @@ def test_rn09_produto_zerado_aparece_na_busca_como_indisponivel(app, repo):
     linha = next(
         i for i, p in enumerate(painel._resultados) if p.quantidade_disponivel_kg == 0
     )
-    assert "Estoque baixo" in painel.tbl_busca.item(linha, 7).text()
+    assert "Estoque baixo" in painel.tbl_busca.item(linha, 8).text()
 
 
 def test_rn14_carrinho_recusa_segunda_empresa(app, repo, monkeypatch, mensagens):
@@ -335,6 +335,8 @@ def test_rn21_avaliacao_liberada_em_pedido_entregue_sem_nota(app, repo):
     produto = marisqueira.produtos[0]
     pedido = compradora.realizar_pedido([(produto, Decimal("30"))], "Rua Y, 2", 2)
     marisqueira.aceitar_pedido(pedido)
+    pedido.compradora.informar_pagamento(pedido)
+    marisqueira.confirmar_pagamento(pedido)
     marisqueira.atualizar_status_entrega(pedido, StatusEntrega.SAIU_PARA_ENTREGA)
     compradora.confirmar_entrega(pedido)
     repo.salvar_pedido(pedido)
@@ -517,6 +519,8 @@ def test_aviso_de_despacho_chega_na_compradora(app, repo):
     repo.marcar_notificacoes_como_lidas(compradora)
 
     marisqueira.aceitar_pedido(pedido)
+    pedido.compradora.informar_pagamento(pedido)
+    marisqueira.confirmar_pagamento(pedido)
     marisqueira.atualizar_status_entrega(pedido, StatusEntrega.SAIU_PARA_ENTREGA)
     repo.salvar_pedido(pedido)
 

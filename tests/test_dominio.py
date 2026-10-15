@@ -209,6 +209,8 @@ def test_rn28_pedido_aceita_varios_produtos_da_mesma_empresa(compradora, maresia
 def test_rn07_item_guarda_copia_do_preco(compradora, maresia, sururu):
     pedido = compradora.realizar_pedido([(sururu, Decimal("30"))], "Rua X, 1", 3)
     maresia.aceitar_pedido(pedido)
+    pedido.compradora.informar_pagamento(pedido)
+    maresia.confirmar_pagamento(pedido)
     maresia.atualizar_status_entrega(pedido, StatusEntrega.SAIU_PARA_ENTREGA)
     compradora.confirmar_entrega(pedido)
     maresia.alterar_preco_produto(sururu, Decimal("99.00"))
@@ -233,6 +235,8 @@ def test_p7_fluxo_completo_ate_entrega(compradora, maresia, sururu):
     assert pedido.status is StatusPedido.ACEITO
     assert sururu.quantidade_disponivel_kg == Decimal("150")  # RN18: estoque baixado
 
+    pedido.compradora.informar_pagamento(pedido)
+    maresia.confirmar_pagamento(pedido)
     maresia.atualizar_status_entrega(pedido, StatusEntrega.SAIU_PARA_ENTREGA)
     compradora.confirmar_entrega(pedido)
     assert pedido.status is StatusPedido.ENTREGUE
@@ -263,6 +267,8 @@ def test_p7_solicitar_ajuste(compradora, maresia, sururu):
 def test_rn22_entrega_nao_atualiza_antes_do_aceite(compradora, maresia, sururu):
     pedido = compradora.realizar_pedido([(sururu, Decimal("30"))], "Rua X, 1", 3)
     with pytest.raises(TransicaoInvalida):
+        pedido.compradora.informar_pagamento(pedido)
+        maresia.confirmar_pagamento(pedido)
         maresia.atualizar_status_entrega(pedido, StatusEntrega.SAIU_PARA_ENTREGA)
 
 
@@ -375,6 +381,8 @@ def test_p26_comparacao_exige_dois_produtos(compradora, sururu):
 def _pedido_entregue(compradora, maresia, produto):
     pedido = compradora.realizar_pedido([(produto, Decimal("30"))], "Rua X, 1", 3)
     maresia.aceitar_pedido(pedido)
+    pedido.compradora.informar_pagamento(pedido)
+    maresia.confirmar_pagamento(pedido)
     maresia.atualizar_status_entrega(pedido, StatusEntrega.SAIU_PARA_ENTREGA)
     compradora.confirmar_entrega(pedido)
     return pedido
@@ -556,6 +564,8 @@ def test_compradora_nao_mexe_em_pedido_de_outra(compradora, maresia, sururu):
 def test_marisqueira_nao_marca_como_entregue(compradora, maresia, sururu):
     pedido = compradora.realizar_pedido([(sururu, Decimal("50"))], "Rua X, 1", 3)
     maresia.aceitar_pedido(pedido)
+    pedido.compradora.informar_pagamento(pedido)
+    maresia.confirmar_pagamento(pedido)
     maresia.atualizar_status_entrega(pedido, StatusEntrega.SAIU_PARA_ENTREGA)
     with pytest.raises(TransicaoInvalida) as erro:
         maresia.atualizar_status_entrega(pedido, StatusEntrega.ENTREGUE)
@@ -566,6 +576,8 @@ def test_marisqueira_nao_marca_como_entregue(compradora, maresia, sururu):
 def test_compradora_confirma_o_recebimento(compradora, maresia, sururu):
     pedido = compradora.realizar_pedido([(sururu, Decimal("50"))], "Rua X, 1", 3)
     maresia.aceitar_pedido(pedido)
+    pedido.compradora.informar_pagamento(pedido)
+    maresia.confirmar_pagamento(pedido)
     maresia.atualizar_status_entrega(pedido, StatusEntrega.SAIU_PARA_ENTREGA)
     assert pedido.pode_confirmar_recebimento
 
@@ -598,6 +610,8 @@ def test_despacho_notifica_a_compradora(compradora, maresia, sururu):
     pedido = compradora.realizar_pedido([(sururu, Decimal("50"))], "Rua X, 1", 3)
     compradora.marcar_notificacoes_como_lidas()
     maresia.aceitar_pedido(pedido)
+    pedido.compradora.informar_pagamento(pedido)
+    maresia.confirmar_pagamento(pedido)
     maresia.atualizar_status_entrega(pedido, StatusEntrega.SAIU_PARA_ENTREGA)
 
     tipos = [n.tipo for n in compradora.notificacoes_nao_lidas]
